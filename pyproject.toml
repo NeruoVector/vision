@@ -1,0 +1,44 @@
+[project]
+name = "neurovector-vision"
+version = "0.1.0"
+description = "드론 영상 기반 장애물 감지 서비스 (YOLO + FastAPI)"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.146.0",
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.16.0",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.54.0",
+]
+
+[project.optional-dependencies]
+vision = [
+    "opencv-python-headless>=5.0.0.93",
+    "ultralytics>=8.4.182",
+]
+
+[project.scripts]
+neurovector-vision = "neurovector_vision.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

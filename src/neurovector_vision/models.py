@@ -1,0 +1,40 @@
+from datetime import UTC, datetime
+
+from pydantic import BaseModel, Field
+
+
+class BoundingBox(BaseModel):
+    """픽셀 좌표 기준 바운딩 박스."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+
+class Detection(BaseModel):
+    """모델이 검출한 단일 객체."""
+
+    label: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    box: BoundingBox
+
+
+class DetectionRequest(BaseModel):
+    """백엔드 `/api/v1/detections` 로 보내는 페이로드."""
+
+    drone_id: str
+    label: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    latitude: float | None = None
+    longitude: float | None = None
+    detected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class DetectResponse(BaseModel):
+    """`POST /detect` 응답."""
+
+    drone_id: str
+    detections: list[Detection]
+    forwarded: int
+    elapsed_ms: float
