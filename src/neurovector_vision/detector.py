@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import Settings
+from .distance import DistanceEstimator
 from .models import BoundingBox, Detection
 
 
@@ -20,6 +21,11 @@ class ObstacleDetector:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._model = None
+        self._distance = DistanceEstimator(
+            horizontal_fov_deg=settings.camera_horizontal_fov_deg,
+            focal_length_px=settings.camera_focal_length_px,
+            object_sizes=settings.resolved_object_sizes,
+        )
 
     def _load_model(self):
         if self._model is not None:
@@ -55,13 +61,22 @@ class ObstacleDetector:
         detections: list[Detection] = []
         for result in results:
             names = result.names
+            # 원본 이미지 너비를 사용해야 리사이즈 후에도 초점 거리가 맞는다.
+            image_width = int(result.orig_shape[1])
             for box in result.boxes:
                 x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
+                label = str(names[int(box.cls[0])])
+                bounding_box = BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
                 detections.append(
                     Detection(
-                        label=str(names[int(box.cls[0])]),
+                        label=label,
                         confidence=float(box.conf[0]),
-                        box=BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2),
+                        box=bounding_box,
+                        distance_m=self._distance.estimate(
+                            label,
+                            bounding_box,
+                            image_width,
+                        ),
                     )
                 )
 

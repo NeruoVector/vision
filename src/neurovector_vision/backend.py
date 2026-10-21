@@ -33,6 +33,7 @@ class BackendClient:
                     confidence=detection.confidence,
                     latitude=latitude,
                     longitude=longitude,
+                    distance_m=detection.distance_m,
                 )
                 response = await client.post(self._url, json=payload.model_dump(mode="json"))
                 response.raise_for_status()
