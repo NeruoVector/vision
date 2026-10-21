@@ -73,6 +73,17 @@ def test_estimator_uses_untruncated_axis() -> None:
     assert estimator.estimate("car", box, image_width=640, image_height=480) == pytest.approx(1.0)
 
 
+def test_estimator_rejects_truncated_primary_axis_for_person() -> None:
+    estimator = DistanceEstimator(focal_length_px=100.0)
+    # 얼굴/상반신이 화면 아래로 잘린 경우: 너비는 남아 있어도 높이를 쓸 수 없다.
+    box = BoundingBox(x1=300, y1=100, x2=600, y2=478)
+
+    result = estimator.estimate_detail("person", box, image_width=640, image_height=480)
+
+    assert result.distance_m is None
+    assert result.note == "bbox_truncated"
+
+
 def test_horizontal_fov_is_inverse_of_focal_length() -> None:
     focal = focal_length_px(640, 90.0)
 
