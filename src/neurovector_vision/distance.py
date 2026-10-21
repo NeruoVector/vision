@@ -54,6 +54,9 @@ DEFAULT_OBJECT_SIZES: dict[str, ObjectSize] = {
 DEFAULT_MIN_AXIS_AGREEMENT = 0.6
 # 화면 경계에서 이 비율 안쪽에 닿은 변은 잘린 것으로 본다.
 DEFAULT_EDGE_MARGIN_RATIO = 0.02
+# 높이가 이 값 이상인 객체는 높이를 거리 추정의 주 축으로 사용한다.
+# 사람/차량처럼 세로 형상이 안정적인 객체의 너비는 자세에 따라 크게 변한다.
+PRIMARY_HEIGHT_MIN_M = 0.5
 
 
 @dataclass(frozen=True)
@@ -188,6 +191,15 @@ class DistanceEstimator:
             height_reliable = box.y1 > margin_y and box.y2 < image_height - margin_y
 
         if not width_reliable and not height_reliable:
+            return DistanceEstimate(None, "bbox_truncated")
+
+        # 주 축이 잘렸다면 보조 축만으로 거리를 만들지 않는다. 예를 들어
+        # 사람의 다리가 화면 아래로 잘린 상태에서 어깨 너비만으로 거리를
+        # 추정하면 자세에 따라 크게 틀릴 수 있다.
+        if size.height_m >= PRIMARY_HEIGHT_MIN_M:
+            if not height_reliable:
+                return DistanceEstimate(None, "bbox_truncated")
+        elif not width_reliable:
             return DistanceEstimate(None, "bbox_truncated")
 
         width_estimate = size.width_m * focal / box_width if width_reliable else None

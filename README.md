@@ -124,8 +124,8 @@ focal_px   = image_width_px / (2 * tan(horizontal_fov_deg / 2))
   두 값이 `NEUROVECTOR_DISTANCE_MIN_AXIS_AGREEMENT` 보다 크게 어긋나면 객체가
   부분적으로 가려졌거나 형상이 다른 것으로 보고 거리를 버립니다.
 - 바운딩 박스가 화면 경계에서 `NEUROVECTOR_DISTANCE_EDGE_MARGIN_RATIO` 안쪽에
-  닿으면 잘린 것으로 보고 해당 축을 사용하지 않습니다. 양쪽 축이 모두 잘리면
-  `distance_m` 은 `null` 입니다.
+  닿으면 잘린 것으로 봅니다. 높이가 0.5 m 이상인 객체는 높이를 주 축으로 쓰므로
+  높이가 잘리면 `distance_m` 은 `null` 입니다. 낮은 객체는 너비를 주 축으로 씁니다.
 - 단안 방식은 객체의 전체 형상이 보이고 실제 크기를 알 때만 정확합니다. 사람의
   머리만 보이거나 차량 일부만 보이는 경우 거리를 표시하지 않습니다.
 
