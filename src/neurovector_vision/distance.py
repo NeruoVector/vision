@@ -70,6 +70,43 @@ class DistanceEstimate:
     note: str | None = None
 
 
+@dataclass(frozen=True)
+class CameraIntrinsics:
+    """핀홀 카메라 내부 파라미터.
+
+    깊이 모델/바운딩 박스가 주는 값은 광축 방향 Z 거리다. 화면 가장자리의
+    실제 직선거리는 ``Z * sqrt(1 + x_n^2 + y_n^2)`` 로 보정한다.
+    """
+
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+
+    def __post_init__(self) -> None:
+        if self.fx <= 0.0 or self.fy <= 0.0:
+            raise ValueError("fx and fy must be positive")
+
+    @classmethod
+    def from_image(cls, image_width: int, image_height: int, focal_px: float) -> CameraIntrinsics:
+        if image_width <= 0 or image_height <= 0:
+            raise ValueError("image dimensions must be positive")
+        if focal_px <= 0.0:
+            raise ValueError("focal_px must be positive")
+        return cls(
+            fx=focal_px,
+            fy=focal_px,
+            cx=image_width / 2.0,
+            cy=image_height / 2.0,
+        )
+
+    def ray_factor(self, x_px: float, y_px: float) -> float:
+        """화면 좌표의 광축 대비 직선거리 배율을 반환한다."""
+        normalized_x = (x_px - self.cx) / self.fx
+        normalized_y = (y_px - self.cy) / self.fy
+        return math.sqrt(1.0 + normalized_x * normalized_x + normalized_y * normalized_y)
+
+
 def focal_length_px(image_width: int, horizontal_fov_deg: float) -> float:
     """수평 화각과 이미지 너비로 초점 거리(픽셀)를 계산한다."""
     if image_width <= 0:
@@ -129,10 +166,14 @@ class DistanceEstimator:
         }
         self._min_axis_agreement = min_axis_agreement
         self._edge_margin_ratio = edge_margin_ratio
+        self._camera_intrinsics: CameraIntrinsics | None = None
 
     @property
     def focal_length_override(self) -> float | None:
         return self._focal_length_override
+
+    def set_camera_intrinsics(self, intrinsics: CameraIntrinsics | None) -> None:
+        self._camera_intrinsics = intrinsics
 
     def set_focal_length_px(self, focal_length_px: float | None) -> None:
         """런타임에 보정된 초점 거리를 적용한다."""
@@ -229,6 +270,10 @@ class DistanceEstimator:
 
         if distance is None or not math.isfinite(distance) or distance <= 0.0:
             return DistanceEstimate(None, "invalid_distance")
+        if self._camera_intrinsics is not None:
+            center_x = (box.x1 + box.x2) / 2.0
+            center_y = (box.y1 + box.y2) / 2.0
+            distance *= self._camera_intrinsics.ray_factor(center_x, center_y)
         return DistanceEstimate(round(distance, 2), note)
 
 
@@ -311,13 +356,20 @@ class FaceDistanceEstimator:
         self,
         actual_distance_m: float,
         eye_distance_px: float,
+        ray_factor: float = 1.0,
     ) -> float:
-        """알려진 거리와 눈 간격으로 얼굴 거리 스케일을 보정한다."""
+        """알려진 직선거리와 눈 간격으로 얼굴 거리 스케일을 보정한다.
+
+        ``ray_factor`` 는 화면 가장자리에서 광축 거리(Z)를 직선거리로 바꾸는
+        배율이다. 보정 시 이 값을 나눠야 이후에도 실제 직선거리가 유지된다.
+        """
         if actual_distance_m <= 0.0:
             raise ValueError("actual_distance_m must be positive")
         if eye_distance_px <= 0.0:
             raise ValueError("eye_distance_px must be positive")
-        scale = actual_distance_m * eye_distance_px
+        if ray_factor <= 0.0:
+            raise ValueError("ray_factor must be positive")
+        scale = actual_distance_m * eye_distance_px / ray_factor
         self.set_ipd_scale_px_m(scale)
         return scale
 

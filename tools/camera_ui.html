@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NeuroVector Vision · Face Distance Test</title>
+  <title>NeuroVector Vision · Face & Body Part Test</title>
   <style>
     :root {
       color-scheme: dark;
@@ -123,6 +123,14 @@
       border: 1px solid rgba(148, 163, 184, .1);
     }
     .det-name { font-size: 13px; font-weight: 700; }
+    .det-priority {
+      display: inline-block; margin-left: 6px; padding: 1px 5px;
+      border-radius: 999px; font-size: 9px; font-weight: 800;
+      vertical-align: middle;
+    }
+    .priority-1 { background: rgba(251, 113, 133, .18); color: var(--red); }
+    .priority-2 { background: rgba(251, 191, 36, .16); color: var(--amber); }
+    .priority-3 { background: rgba(52, 211, 153, .14); color: var(--green); }
     .det-conf { color: var(--muted); font-size: 11px; }
     .det-note {
       grid-column: 1 / -1; color: var(--amber); font-size: 10px;
@@ -215,7 +223,7 @@
         <div class="mark">N</div>
         <div>
           <h1>NeuroVector Vision</h1>
-          <p class="sub">로컬 카메라 · YOLO26-pose + depth · 얼굴 거리 테스트</p>
+          <p class="sub">로컬 카메라 · YOLO26-pose + depth · 얼굴/신체 부위 거리 테스트</p>
         </div>
       </div>
       <div class="live"><span class="dot"></span> LIVE · LOCAL CAMERA</div>
@@ -234,7 +242,7 @@
           <i class="corner bl"></i><i class="corner br"></i>
         </div>
         <div class="video-foot">
-          <span>YOLO26-pose + depth · GPU · 얼굴 거리</span>
+          <span>YOLO26-pose + depth · GPU · 얼굴/몸통/팔/손/다리/발</span>
           <span id="updated">waiting for first frame</span>
         </div>
       </section>
@@ -250,20 +258,20 @@
             <div class="metric-value"><span id="fps">—</span></div>
           </div>
           <div class="metric">
-            <div class="metric-label">감지 얼굴</div>
+            <div class="metric-label">감지 부위</div>
             <div class="metric-value"><span id="count">0</span><small>개</small></div>
           </div>
           <div class="metric">
-            <div class="metric-label">최근접 얼굴 거리</div>
+            <div class="metric-label">최근접 부위 거리</div>
             <div class="metric-value"><span id="nearest">—</span><small>m</small></div>
           </div>
         </div>
 
         <div class="panel side-panel">
           <div class="side-title">
-            <strong>Faces</strong><span id="det-count">0 found</span>
+            <strong>Face & Body Parts</strong><span id="det-count">0 found</span>
           </div>
-          <div id="detections"><div class="empty">아직 감지된 얼굴이 없습니다.</div></div>
+          <div id="detections"><div class="empty">아직 감지된 부위가 없습니다.</div></div>
         </div>
 
         <div class="panel side-panel">
@@ -278,6 +286,7 @@
           <div class="status-row"><span>Focal</span><span id="focal">—</span></div>
           <div class="status-row"><span>FOV</span><span id="fov">—</span></div>
           <div class="status-row"><span>Face scale</span><span id="face-scale">—</span></div>
+          <div class="status-row"><span>Body parts</span><span id="parts-status" class="ok">—</span></div>
           <div class="status-row"><span>Depth</span><span id="depth-status" class="ok">—</span></div>
           <div class="status-row"><span>Frames</span><span id="frames">0</span></div>
           <div class="status-row"><span>Stream</span><span class="ok">MJPEG</span></div>
@@ -326,8 +335,21 @@
   <script>
     const fmt = (v, d = 1) => v == null ? '—' : Number(v).toFixed(d)
     const colorClass = (d) => d == null ? '' : d < 2 ? 'd-red' : d < 5 ? 'd-amber' : 'd-green'
+    const partNames = {
+      face: '얼굴',
+      body: '몸통',
+      left_arm: '왼팔',
+      right_arm: '오른팔',
+      left_hand: '왼손',
+      right_hand: '오른손',
+      left_leg: '왼다리',
+      right_leg: '오른다리',
+      left_foot: '왼발',
+      right_foot: '오른발',
+    }
     const distanceNotes = {
       depth_keypoint_mismatch: '깊이/눈 간격 추정 불일치 · 깊이 우선',
+      depth_unavailable: '이 부위의 깊이 값을 읽을 수 없음',
       eye_keypoints_missing: '눈 키포인트 없음',
       eye_keypoints_too_close: '눈 간격이 너무 작음',
       ear_keypoints_missing: '귀 키포인트 없음',
@@ -341,7 +363,7 @@
     }
 
     function updateCalibrationTargets(detections) {
-      const disabled = detections.length === 0
+      const disabled = !detections.some(d => d.label === 'face')
       document.getElementById('cal-distance').disabled = disabled
       document.getElementById('calibrate-button').disabled = disabled
     }
@@ -362,6 +384,10 @@
           : `${fmt(data.fov_deg, 1)}°`
         document.getElementById('face-scale').textContent =
           data.face_scale_px_m == null ? '—' : `${fmt(data.face_scale_px_m, 1)} px·m`
+        document.getElementById('parts-status').textContent =
+          data.body_parts_enabled ? 'on' : 'face only'
+        document.getElementById('parts-status').className =
+          data.body_parts_enabled ? 'ok' : 'warn'
         document.getElementById('model-name').textContent = data.model || 'YOLO26-pose'
         document.getElementById('device').textContent = data.device || '—'
         document.getElementById('depth-status').textContent = data.depth_enabled
@@ -391,7 +417,7 @@
 
         const list = document.getElementById('detections')
         if (!data.detections.length) {
-          list.innerHTML = '<div class="empty">아직 감지된 얼굴이 없습니다.</div>'
+          list.innerHTML = '<div class="empty">아직 감지된 부위가 없습니다.</div>'
         } else {
           list.innerHTML = data.detections.map(d => {
             const note = d.distance_note
@@ -401,12 +427,20 @@
             if (d.depth_distance_m != null) details.push(`depth ${fmt(d.depth_distance_m, 2)} m`)
             if (d.keypoint_distance_m != null) details.push(`eye ${fmt(d.keypoint_distance_m, 2)} m`)
             if (d.distance_source) details.push(d.distance_source)
+            if (d.ray_factor != null && d.ray_factor > 1.001) {
+              details.push(`사선 x${fmt(d.ray_factor, 3)}`)
+            }
             const detail = details.length
               ? `<div class="det-conf">${details.join(' · ')}</div>`
               : ''
             return `
               <div class="det">
-                <div class="det-name">${d.label}</div>
+                <div class="det-name">
+                  ${partNames[d.label] || d.label}
+                  <span class="det-priority priority-${d.priority_level}">
+                    ${d.priority_name || d.priority_level + '단계'}
+                  </span>
+                </div>
                 <div class="det-distance ${colorClass(d.distance_m)}">
                   ${d.distance_m == null ? '—' : fmt(d.distance_m, 2) + ' m'}
                 </div>
@@ -448,7 +482,7 @@
           return
         }
         result.textContent =
-          `적용됨: 눈 ${fmt(data.eye_distance_px, 0)} px · IPD ${fmt(data.ipd_scale_px_m, 1)} px·m · depth x${fmt(data.depth_scale, 3)}`
+          `적용됨: 눈 ${fmt(data.eye_distance_px, 0)} px · IPD ${fmt(data.ipd_scale_px_m, 1)} px·m · depth x${fmt(data.depth_scale, 3)} · 사선 x${fmt(data.ray_factor, 3)}`
         result.className = 'cal-result good'
         const env = document.getElementById('cal-env')
         env.textContent = `${data.recommended_env}\n# .env에 추가 후 재시작`

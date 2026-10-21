@@ -35,6 +35,35 @@ class CameraCalibration:
     def focal_px(self) -> float:
         return float(self.camera_matrix[0, 0])
 
+    def scaled_for(self, image_width: int, image_height: int) -> CameraCalibration:
+        """다른 해상도로 리사이즈된 프레임에 맞게 내부 파라미터를 스케일한다.
+
+        정규화 좌표 기준의 왜곡 계수는 유지하고, 픽셀 단위인 fx/fy/cx/cy 만
+        해상도 비율에 맞춰 바꾼다.
+        """
+        if image_width <= 0 or image_height <= 0:
+            raise ValueError("image dimensions must be positive")
+        if self.image_size is None:
+            return self
+        old_width, old_height = self.image_size
+        if old_width <= 0 or old_height <= 0:
+            return self
+        if (old_width, old_height) == (image_width, image_height):
+            return self
+        scale_x = image_width / old_width
+        scale_y = image_height / old_height
+        matrix = self.camera_matrix.copy()
+        matrix[0, 0] *= scale_x
+        matrix[0, 2] *= scale_x
+        matrix[1, 1] *= scale_y
+        matrix[1, 2] *= scale_y
+        return CameraCalibration(
+            camera_matrix=matrix,
+            distortion_coefficients=self.distortion_coefficients.copy(),
+            image_size=(image_width, image_height),
+            reprojection_error=self.reprojection_error,
+        )
+
     def undistort(self, frame: np.ndarray) -> np.ndarray:
         """렌즈 왜곡을 제거한다. 왜곡 계수가 0이면 원본을 그대로 반환한다."""
         if np.allclose(self.distortion_coefficients, 0.0):

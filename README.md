@@ -5,7 +5,10 @@
 - **Python 3.13 + uv**
 - FastAPI + **YOLO26** (ultralytics)
 - NVIDIA GPU(CUDA) 추론, 실패 시 CPU 자동 폴백
-- 단안 깊이(YOLO26-depth) + 얼굴 키포인트 기반 거리 추정 (`distance_m`)
+- 단안 깊이(YOLO26-depth) + 얼굴/신체 키포인트 기반 거리 추정 (`distance_m`)
+- 얼굴·몸통·양팔·양손·양다리·양발 감지 (YOLO26-pose 17 키포인트)
+- 화면 가장자리 사선거리 보정 (`R = Z × √(1 + x² + y²)`)
+- 감지 우선순위 1~3단계 (`priority_level`)
 - 체커보드 카메라 캘리브레이션(렌즈 왜곡/초점 거리)
 - 감지 결과를 `backend` 의 `/api/v1/detections` 로 전송
 
@@ -41,23 +44,29 @@ GPU 메모리가 부족하면 `--no-depth` 또는 `NEUROVECTOR_DEPTH_ENABLED=fal
 
 API 문서: http://localhost:8082/docs
 
-## 카메라 테스트 UI (얼굴 거리)
+## 카메라 테스트 UI (얼굴/신체 부위 거리)
 
-로컬 카메라에서 **얼굴만** 감지하고, YOLO26-pose 키포인트와 YOLO26-depth 깊이 맵을
-융합해 거리를 표시하는 개발용 도구입니다. 서버가 카메라를 직접 열어 MJPEG 로
-전송하므로 브라우저 카메라 권한은 필요 없습니다.
+로컬 카메라에서 **얼굴과 신체 부위**를 감지하고, YOLO26-pose 키포인트와
+YOLO26-depth 깊이 맵을 융합해 부위별 거리를 표시하는 개발용 도구입니다.
+서버가 카메라를 직접 열어 MJPEG 로 전송하므로 브라우저 카메라 권한은 필요 없습니다.
 
 ```bash
 uv sync --extra vision
 uv run --extra vision python tools/camera_ui.py
 # http://127.0.0.1:8090
+
+# 얼굴만 표시하고 싶을 때
+uv run --extra vision python tools/camera_ui.py --face-only
 ```
 
-- 얼굴 박스, confidence, **깊이 기반 거리**, 눈 간격 기반 보조 거리, 추론 시간/FPS.
-- `--model yolo26n-pose.pt` (얼굴 키포인트), `--depth-model yolo26n-depth.pt`.
-- `--device auto|0|cpu`, `--no-depth`, `--focal`, `--face-scale` 지원.
+- 얼굴, 몸통, 왼/오른팔, 왼/오른손, 왼/오른다리, 왼/오른발 박스와 거리.
+- 얼굴은 눈 간격 기반 보조 거리도 함께 표시하고, 나머지 부위는 깊이 모델 거리를 사용합니다.
+- `--model yolo26n-pose.pt` (사람 키포인트), `--depth-model yolo26n-depth.pt`.
+- `--device auto|0|cpu`, `--no-depth`, `--face-only`, `--focal`, `--face-scale` 지원.
 - YOLO26 가중치는 첫 실행 시 자동 다운로드됩니다. (`yolo26n-pose.pt`, `yolo26n-depth.pt`)
 - GPU 추론은 약 50~70ms/프레임 (RTX 3050, pose+depth, warmup 제외).
+- 손/팔은 YOLO26-pose가 사람을 감지했을 때 키포인트로 계산합니다. 손만 화면을
+  가득 채우는 초근접 장면은 전용 손 키포인트 모델이 필요합니다.
 
 ### 얼굴 거리 보정
 
@@ -169,6 +178,22 @@ export NEUROVECTOR_OBJECT_SIZES='{
 키는 YOLO 클래스 이름과 같아야 하며 대소문자는 무시됩니다. 기본 표에 있는
 클래스도 같은 방식으로 크기를 덮어쓸 수 있습니다.
 
+### 감지 우선순위
+
+| 단계 | 대상 | 예시 |
+| --- | --- | --- |
+| 1단계 · 위험 | 얼굴, 신체 부위, 동물 | `face`, `body`, `left_hand`, `right_arm`, `person`, `dog`, `고양이` |
+| 2단계 · 주의 | 차량, 일반 사물 | `car`, `truck`, `bicycle`, 알 수 없는 클래스 |
+| 3단계 · 낮음 | 손상되어도 큰 지장이 없는 자연물 | `leaf`, `fallen leaf`, `나뭇잎` |
+
+나뭇잎 데이터셋은 아직 없지만 라벨을 미리 등록해 두었습니다. 데이터셋/모델이
+추가되면 `leaf` 클래스가 자동으로 3단계로 분류됩니다. 클래스 이름이 다르면
+`NEUROVECTOR_PRIORITY_LEVELS` JSON으로 덮어쓸 수 있습니다.
+
+```bash
+export NEUROVECTOR_PRIORITY_LEVELS='{"leaf_damage": 3, "my-obstacle": 1}'
+```
+
 ### 거리 보정 요약
 
 | 대상 | 방법 | 저장 값 |
@@ -177,6 +202,7 @@ export NEUROVECTOR_OBJECT_SIZES='{
 | 얼굴 근거리 | UI에서 실제 얼굴 거리 입력 | `NEUROVECTOR_FACE_IPD_SCALE_PX_M` |
 | 깊이 모델 | UI에서 실제 얼굴 거리 입력 | `NEUROVECTOR_DEPTH_SCALE` |
 | 일반 객체 | `NEUROVECTOR_CAMERA_FOCAL_LENGTH_PX` 또는 FOV | `.env` |
+| 사선거리 | 체커보드 캘리브레이션(주점/초점) | `camera_calibration.json` |
 
 - 해상도가 바뀌면 초점 거리와 얼굴 스케일도 비례해서 바뀝니다. 같은 해상도에서
   보정하세요.
@@ -238,7 +264,9 @@ src/neurovector_vision/
 ├── backend.py    # 백엔드 API 클라이언트
 ├── config.py     # 환경변수 설정
 ├── detector.py     # YOLO26 객체 감지기
-├── face_detector.py# YOLO26-pose 얼굴 키포인트 + depth 융합
+├── face_detector.py# YOLO26-pose 얼굴/신체 부위 키포인트 + depth 융합
+├── body_parts.py   # 키포인트 → 몸통/팔/손/다리/발 박스
+├── priority.py     # 1~3단계 위험 우선순위 매핑
 ├── depth.py        # YOLO26-depth 단안 깊이 추정
 ├── camera_calibration.py # 체커보드 캘리브레이션 로드/왜곡 보정
 ├── distance.py     # 단안 거리 추정 / 얼굴 거리 / 클래스별 크기
@@ -246,7 +274,7 @@ src/neurovector_vision/
 └── __main__.py     # uvicorn 진입점
 tests/
 tools/
-├── camera_ui.py         # 얼굴 거리 테스트 UI 서버
+├── camera_ui.py         # 얼굴/신체 부위 거리 테스트 UI 서버
 ├── camera_ui.html       # 테스트 UI 페이지
 └── calibrate_camera.py  # 체커보드 카메라 캘리브레이션
 ```
@@ -278,6 +306,7 @@ uv run ruff format .
 | `NEUROVECTOR_DEPTH_SCALE` | `1.0` |
 | `NEUROVECTOR_FACE_IPD_M` | `0.063` |
 | `NEUROVECTOR_FACE_KEYPOINT_CONFIDENCE` | `0.5` |
+| `NEUROVECTOR_BODY_PARTS_ENABLED` | `true` |
 | `NEUROVECTOR_FACE_IPD_SCALE_PX_M` | (없음, focal × IPD) |
 | `NEUROVECTOR_CAMERA_CALIBRATION_PATH` | `camera_calibration.json` |
 | `NEUROVECTOR_CAMERA_HORIZONTAL_FOV_DEG` | `70.0` |
@@ -285,4 +314,5 @@ uv run ruff format .
 | `NEUROVECTOR_DISTANCE_MIN_AXIS_AGREEMENT` | `0.6` |
 | `NEUROVECTOR_DISTANCE_EDGE_MARGIN_RATIO` | `0.02` |
 | `NEUROVECTOR_OBJECT_SIZES` | `{}` (기본 크기 표 사용) |
+| `NEUROVECTOR_PRIORITY_LEVELS` | `{}` (기본 1~3단계 매핑 사용) |
 | `NEUROVECTOR_DRONE_ID` | `drone-001` |

@@ -8,6 +8,7 @@ Ultralytics YOLO26-depth는 입력 이미지와 같은 크기의 밀도 깊이 �
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 
 import numpy as np
 
@@ -83,6 +84,48 @@ class DepthEstimator:
         values = values[
             (values >= self._settings.depth_min_m) & (values <= self._settings.depth_max_m)
         ]
+        if values.size < min_pixels:
+            return None
+        return float(np.median(values))
+
+    def median_depth_around_points(
+        self,
+        depth_map: np.ndarray,
+        points: Iterable[tuple[float, float]],
+        *,
+        radius_px: float = 6.0,
+        min_pixels: int = 8,
+    ) -> float | None:
+        """키포인트 주변 작은 패치들의 유효 깊이 중앙값을 반환한다.
+
+        팔/다리처럼 얇은 부위는 바운딩 박스 중앙값을 쓰면 배경이 섞이기
+        쉽다. 키포인트를 따라 좁은 패치만 샘플링해 실제 신체 표면 깊이에
+        가깝게 만든다.
+        """
+        height, width = depth_map.shape[:2]
+        radius = max(1, int(round(radius_px)))
+        patches: list[np.ndarray] = []
+        for x_px, y_px in points:
+            if not np.isfinite(x_px) or not np.isfinite(y_px):
+                continue
+            center_x = int(round(x_px))
+            center_y = int(round(y_px))
+            x1 = max(0, center_x - radius)
+            x2 = min(width, center_x + radius + 1)
+            y1 = max(0, center_y - radius)
+            y2 = min(height, center_y + radius + 1)
+            region = depth_map[y1:y2, x1:x2]
+            if region.size == 0:
+                continue
+            values = region[np.isfinite(region)]
+            values = values[
+                (values >= self._settings.depth_min_m) & (values <= self._settings.depth_max_m)
+            ]
+            if values.size:
+                patches.append(values)
+        if not patches:
+            return None
+        values = np.concatenate(patches)
         if values.size < min_pixels:
             return None
         return float(np.median(values))

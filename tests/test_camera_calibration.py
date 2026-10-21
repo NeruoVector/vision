@@ -38,3 +38,19 @@ def test_camera_calibration_undistorts_frame_shape() -> None:
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
 
     assert calibration.undistort(frame).shape == frame.shape
+
+
+def test_camera_calibration_scales_for_other_resolution() -> None:
+    matrix = np.array([[900.0, 0.0, 640.0], [0.0, 900.0, 360.0], [0.0, 0.0, 1.0]])
+    calibration = CameraCalibration(
+        camera_matrix=matrix,
+        distortion_coefficients=np.zeros(5),
+        image_size=(1280, 720),
+    )
+
+    scaled = calibration.scaled_for(640, 360)
+
+    assert scaled.camera_matrix[0, 0] == pytest.approx(450.0)
+    assert scaled.camera_matrix[0, 2] == pytest.approx(320.0)
+    assert scaled.camera_matrix[1, 2] == pytest.approx(180.0)
+    assert scaled.image_size == (640, 360)

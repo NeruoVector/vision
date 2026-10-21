@@ -32,6 +32,7 @@ def test_detection_model_validation() -> None:
     )
     assert detection.label == "tree"
     assert detection.distance_m == 4.2
+    assert detection.priority_level == 2
 
 
 def test_detect_returns_distance_and_forwards_it(
@@ -52,6 +53,7 @@ def test_detect_returns_distance_and_forwards_it(
                     confidence=0.9,
                     box=BoundingBox(x1=0, y1=0, x2=100, y2=200),
                     distance_m=6.4,
+                    priority_level=1,
                 )
             ]
 
@@ -79,4 +81,6 @@ def test_detect_returns_distance_and_forwards_it(
 
     assert response.status_code == 200
     assert response.json()["detections"][0]["distance_m"] == 6.4
+    assert response.json()["detections"][0]["priority_level"] == 1
     assert forwarded[0].distance_m == 6.4
+    assert forwarded[0].priority_level == 1
