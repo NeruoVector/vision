@@ -18,6 +18,7 @@ class Detection(BaseModel):
     label: str
     confidence: float = Field(ge=0.0, le=1.0)
     box: BoundingBox
+    distance_m: float | None = Field(default=None, ge=0.0)
 
 
 class DetectionRequest(BaseModel):
@@ -28,6 +29,7 @@ class DetectionRequest(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     latitude: float | None = None
     longitude: float | None = None
+    distance_m: float | None = Field(default=None, ge=0.0)
     detected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
