@@ -83,6 +83,7 @@ class ObstacleDetector:
             source=source,
             conf=self._settings.confidence_threshold,
             iou=self._settings.iou_threshold,
+            device=self._settings.resolved_device,
             verbose=False,
         )
 

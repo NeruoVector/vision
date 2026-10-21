@@ -3,6 +3,7 @@ import pytest
 from neurovector_vision.config import Settings
 from neurovector_vision.distance import (
     DistanceEstimator,
+    FaceDistanceEstimator,
     focal_length_from_reference,
     focal_length_px,
     horizontal_fov_deg,
@@ -33,8 +34,8 @@ def test_estimator_uses_focal_length_override() -> None:
     estimator = DistanceEstimator(focal_length_px=100.0)
     box = BoundingBox(x1=0, y1=0, x2=100, y2=100)
 
-    # 너비 1.8m, 높이 1.5m 추정값이 모두 유효하므로 면적 기반 기하평균을 쓴다.
-    assert estimator.estimate("car", box, image_width=1920) == pytest.approx(1.64)
+    # 높이가 0.5m 이상이므로 너비와 섞지 않고 높이만 사용한다.
+    assert estimator.estimate("car", box, image_width=1920) == pytest.approx(1.5)
 
 
 def test_estimator_returns_none_for_unknown_class() -> None:
@@ -73,15 +74,15 @@ def test_estimator_uses_untruncated_axis() -> None:
     assert estimator.estimate("car", box, image_width=640, image_height=480) == pytest.approx(1.0)
 
 
-def test_estimator_rejects_truncated_primary_axis_for_person() -> None:
+def test_estimator_uses_width_as_approximate_when_primary_axis_is_truncated() -> None:
     estimator = DistanceEstimator(focal_length_px=100.0)
-    # 얼굴/상반신이 화면 아래로 잘린 경우: 너비는 남아 있어도 높이를 쓸 수 없다.
+    # 얼굴/상반신이 화면 아래로 잘린 경우: 높이 대신 너비로 근사한다.
     box = BoundingBox(x1=300, y1=100, x2=600, y2=478)
 
     result = estimator.estimate_detail("person", box, image_width=640, image_height=480)
 
-    assert result.distance_m is None
-    assert result.note == "bbox_truncated"
+    assert result.distance_m == pytest.approx(0.17)
+    assert result.note == "approximate_bbox_truncated"
 
 
 def test_horizontal_fov_is_inverse_of_focal_length() -> None:
@@ -102,7 +103,7 @@ def test_estimator_can_apply_runtime_focal_length() -> None:
     estimator.set_focal_length_px(200.0)
 
     assert estimator.focal_length_override == 200.0
-    assert estimator.estimate("car", box, image_width=640) == pytest.approx(3.29)
+    assert estimator.estimate("car", box, image_width=640) == pytest.approx(3.0)
 
 
 def test_custom_object_sizes_merge_with_defaults() -> None:
@@ -125,3 +126,66 @@ def test_object_sizes_from_environment_json(monkeypatch: pytest.MonkeyPatch) -> 
     settings = Settings(_env_file=None)
 
     assert settings.resolved_object_sizes["fine-tuned-obstacle"].width_m == 2.5
+
+
+def test_estimator_prefers_height_without_blending_pose_dependent_width() -> None:
+    estimator = DistanceEstimator(focal_length_px=1000.0)
+    # 걷는 사람처럼 너비가 부풀어도 높이 1.7m 기준 거리를 유지한다.
+    box = BoundingBox(x1=100, y1=100, x2=400, y2=600)
+
+    result = estimator.estimate_detail("person", box, image_width=1280, image_height=720)
+
+    assert result.distance_m == pytest.approx(3.4)
+    assert result.note == "approximate_axis_mismatch"
+
+
+def test_estimator_rejects_head_only_aspect() -> None:
+    estimator = DistanceEstimator(focal_length_px=1000.0)
+    # 얼굴만 화면 안에 들어온 경우 전체 사람 형상이 아니므로 거리를 버린다.
+    box = BoundingBox(x1=100, y1=100, x2=600, y2=250)
+
+    result = estimator.estimate_detail("person", box, image_width=1280, image_height=720)
+
+    assert result.distance_m is None
+    assert result.note == "inconsistent_axes"
+
+
+def test_face_estimator_uses_interpupillary_distance() -> None:
+    estimator = FaceDistanceEstimator(focal_length_px=1000.0, ipd_m=0.063)
+    result = estimator.estimate_eyes((100.0, 100.0, 0.9), (163.0, 100.0, 0.9), 640)
+
+    assert result.distance_m == pytest.approx(1.0)
+    assert result.note is None
+
+
+def test_face_estimator_rejects_missing_eyes() -> None:
+    estimator = FaceDistanceEstimator(focal_length_px=1000.0)
+    result = estimator.estimate_eyes((100.0, 100.0, 0.2), (163.0, 100.0, 0.9), 640)
+
+    assert result.distance_m is None
+    assert result.note == "eye_keypoints_missing"
+
+
+def test_face_estimator_rejects_too_close_eyes() -> None:
+    estimator = FaceDistanceEstimator(focal_length_px=1000.0, min_eye_distance_px=10.0)
+    result = estimator.estimate_eyes((100.0, 100.0, 0.9), (103.0, 100.0, 0.9), 640)
+
+    assert result.distance_m is None
+    assert result.note == "eye_keypoints_too_close"
+
+
+def test_face_estimator_uses_ears_when_eyes_are_missing() -> None:
+    estimator = FaceDistanceEstimator(focal_length_px=1000.0)
+    result = estimator.estimate_ears((50.0, 100.0, 0.9), (200.0, 100.0, 0.9), 640)
+
+    assert result.distance_m == pytest.approx(1.0)
+    assert result.note is None
+
+
+def test_face_estimator_calibrates_from_known_distance() -> None:
+    estimator = FaceDistanceEstimator(focal_length_px=1000.0)
+    scale = estimator.calibrate_from_eyes(0.7, 100.0)
+
+    assert scale == pytest.approx(70.0)
+    assert estimator.ipd_scale_px_m(640) == pytest.approx(70.0)
+    assert estimator.estimate_eyes((0.0, 0.0, 0.9), (100.0, 0.0, 0.9), 640).distance_m == 0.7

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NeuroVector Vision · Camera Test</title>
+  <title>NeuroVector Vision · Face Distance Test</title>
   <style>
     :root {
       color-scheme: dark;
@@ -215,7 +215,7 @@
         <div class="mark">N</div>
         <div>
           <h1>NeuroVector Vision</h1>
-          <p class="sub">로컬 카메라 · YOLO 실시간 감지 테스트</p>
+          <p class="sub">로컬 카메라 · YOLO26-pose + depth · 얼굴 거리 테스트</p>
         </div>
       </div>
       <div class="live"><span class="dot"></span> LIVE · LOCAL CAMERA</div>
@@ -234,7 +234,7 @@
           <i class="corner bl"></i><i class="corner br"></i>
         </div>
         <div class="video-foot">
-          <span>YOLOv8n · CPU · 단안 거리 추정</span>
+          <span>YOLO26-pose + depth · GPU · 얼굴 거리</span>
           <span id="updated">waiting for first frame</span>
         </div>
       </section>
@@ -250,20 +250,20 @@
             <div class="metric-value"><span id="fps">—</span></div>
           </div>
           <div class="metric">
-            <div class="metric-label">감지 객체</div>
+            <div class="metric-label">감지 얼굴</div>
             <div class="metric-value"><span id="count">0</span><small>개</small></div>
           </div>
           <div class="metric">
-            <div class="metric-label">최근접 거리</div>
+            <div class="metric-label">최근접 얼굴 거리</div>
             <div class="metric-value"><span id="nearest">—</span><small>m</small></div>
           </div>
         </div>
 
         <div class="panel side-panel">
           <div class="side-title">
-            <strong>Detections</strong><span id="det-count">0 found</span>
+            <strong>Faces</strong><span id="det-count">0 found</span>
           </div>
-          <div id="detections"><div class="empty">아직 감지된 객체가 없습니다.</div></div>
+          <div id="detections"><div class="empty">아직 감지된 얼굴이 없습니다.</div></div>
         </div>
 
         <div class="panel side-panel">
@@ -273,9 +273,12 @@
           <div class="status-row">
             <span>Camera</span><span id="camera-status" class="warn">starting</span>
           </div>
-          <div class="status-row"><span>Model</span><span class="ok">YOLO</span></div>
+          <div class="status-row"><span>Model</span><span id="model-name" class="ok">YOLO26-pose</span></div>
+          <div class="status-row"><span>Device</span><span id="device" class="ok">—</span></div>
           <div class="status-row"><span>Focal</span><span id="focal">—</span></div>
           <div class="status-row"><span>FOV</span><span id="fov">—</span></div>
+          <div class="status-row"><span>Face scale</span><span id="face-scale">—</span></div>
+          <div class="status-row"><span>Depth</span><span id="depth-status" class="ok">—</span></div>
           <div class="status-row"><span>Frames</span><span id="frames">0</span></div>
           <div class="status-row"><span>Stream</span><span class="ok">MJPEG</span></div>
           <div id="error" class="error-box"></div>
@@ -292,15 +295,11 @@
             <strong>Distance Calibration</strong><span id="cal-state">—</span>
           </div>
           <p class="hint">
-            전체 객체가 보일 때 실제 거리를 입력하면 초점 거리를 보정합니다.
-            보정값은 이 실행에만 적용되며, 유지하려면 아래 환경변수를
-            <code>.env</code>에 넣고 재시작하세요.
+            가장 큰 얼굴까지의 실제 거리를 입력하면 눈 간격(IPD)과 깊이 모델
+            스케일을 함께 보정합니다. 보정값은 이 실행에만 적용되며, 유지하려면
+            아래 환경변수를 <code>.env</code>에 넣고 재시작하세요.
           </p>
-          <label class="field-label" for="cal-label">대상</label>
-          <select id="cal-label" class="field">
-            <option value="">신뢰 가능한 감지 없음</option>
-          </select>
-          <label class="field-label" for="cal-distance">실제 거리 (m)</label>
+          <label class="field-label" for="cal-distance">얼굴까지 실제 거리 (m)</label>
           <input
             id="cal-distance"
             class="field"
@@ -320,7 +319,7 @@
 
     <footer>
       <span>테스트 전용 페이지 · 영상과 감지 결과는 이 브라우저로만 전송됩니다.</span>
-      <span><code>distance = real_size × focal / bbox_px</code></span>
+      <span><code>distance = depth_median × depth_scale</code> · fallback <code>eye_scale / eye_px</code></span>
     </footer>
   </main>
 
@@ -328,30 +327,21 @@
     const fmt = (v, d = 1) => v == null ? '—' : Number(v).toFixed(d)
     const colorClass = (d) => d == null ? '' : d < 2 ? 'd-red' : d < 5 ? 'd-amber' : 'd-green'
     const distanceNotes = {
-      bbox_truncated: '화면 경계에 잘린 객체 · 거리 계산 안 함',
-      inconsistent_axes: '너비/높이 형상 불일치 · 거리 계산 안 함',
-      unknown_class: '클래스 크기 정보 없음',
-      degenerate_bbox: '유효하지 않은 바운딩 박스',
+      depth_keypoint_mismatch: '깊이/눈 간격 추정 불일치 · 깊이 우선',
+      eye_keypoints_missing: '눈 키포인트 없음',
+      eye_keypoints_too_close: '눈 간격이 너무 작음',
+      ear_keypoints_missing: '귀 키포인트 없음',
+      ear_keypoints_too_close: '귀 간격이 너무 작음',
       invalid_focal: '초점 거리 설정 오류',
       invalid_distance: '유효하지 않은 거리',
+      bbox_truncated: '화면 경계에 잘린 객체',
+      inconsistent_axes: '너비/높이 형상 불일치',
+      unknown_class: '클래스 크기 정보 없음',
+      degenerate_bbox: '유효하지 않은 바운딩 박스',
     }
 
     function updateCalibrationTargets(detections) {
-      const select = document.getElementById('cal-label')
-      const reliable = detections.filter(d => d.distance_m != null)
-      const signature = reliable.map(d => d.label).join('|')
-      if (select.dataset.signature !== signature) {
-        const previous = select.value
-        select.innerHTML = reliable.length
-          ? reliable.map(d => `<option value="${d.label}">${d.label}</option>`).join('')
-          : '<option value="">신뢰 가능한 감지 없음</option>'
-        if (previous && [...select.options].some(option => option.value === previous)) {
-          select.value = previous
-        }
-        select.dataset.signature = signature
-      }
-      const disabled = reliable.length === 0
-      select.disabled = disabled
+      const disabled = detections.length === 0
       document.getElementById('cal-distance').disabled = disabled
       document.getElementById('calibrate-button').disabled = disabled
     }
@@ -370,8 +360,16 @@
         document.getElementById('fov').textContent = data.fov_deg == null
           ? '—'
           : `${fmt(data.fov_deg, 1)}°`
+        document.getElementById('face-scale').textContent =
+          data.face_scale_px_m == null ? '—' : `${fmt(data.face_scale_px_m, 1)} px·m`
+        document.getElementById('model-name').textContent = data.model || 'YOLO26-pose'
+        document.getElementById('device').textContent = data.device || '—'
+        document.getElementById('depth-status').textContent = data.depth_enabled
+          ? `${fmt(data.depth_ms, 0)} ms · x${fmt(data.depth_scale, 3)}`
+          : 'off'
+        document.getElementById('depth-status').className = data.depth_enabled ? 'ok' : 'warn'
         document.getElementById('cal-state').textContent =
-          data.focal_px == null ? '—' : `${fmt(data.focal_px, 0)} px`
+          data.face_scale_px_m == null ? '—' : `${fmt(data.face_scale_px_m, 1)} px·m`
         document.getElementById('camera-info').textContent =
           `${data.camera.width}×${data.camera.height} · MJPEG`
         document.getElementById('camera-status').textContent =
@@ -393,11 +391,18 @@
 
         const list = document.getElementById('detections')
         if (!data.detections.length) {
-          list.innerHTML = '<div class="empty">아직 감지된 객체가 없습니다.</div>'
+          list.innerHTML = '<div class="empty">아직 감지된 얼굴이 없습니다.</div>'
         } else {
           list.innerHTML = data.detections.map(d => {
             const note = d.distance_note
               ? `<div class="det-note">${distanceNotes[d.distance_note] || d.distance_note}</div>`
+              : ''
+            const details = []
+            if (d.depth_distance_m != null) details.push(`depth ${fmt(d.depth_distance_m, 2)} m`)
+            if (d.keypoint_distance_m != null) details.push(`eye ${fmt(d.keypoint_distance_m, 2)} m`)
+            if (d.distance_source) details.push(d.distance_source)
+            const detail = details.length
+              ? `<div class="det-conf">${details.join(' · ')}</div>`
               : ''
             return `
               <div class="det">
@@ -406,6 +411,7 @@
                   ${d.distance_m == null ? '—' : fmt(d.distance_m, 2) + ' m'}
                 </div>
                 <div class="det-conf">confidence ${fmt(d.confidence * 100, 1)}%</div>
+                ${detail}
                 ${note}
               </div>
             `
@@ -419,7 +425,6 @@
 
     async function calibrate() {
       const actual = Number(document.getElementById('cal-distance').value)
-      const label = document.getElementById('cal-label').value
       const result = document.getElementById('cal-result')
       const button = document.getElementById('calibrate-button')
       if (!Number.isFinite(actual) || actual <= 0) {
@@ -427,12 +432,6 @@
         result.className = 'cal-result bad'
         return
       }
-      if (!label) {
-        result.textContent = '신뢰 가능한 감지가 없습니다.'
-        result.className = 'cal-result bad'
-        return
-      }
-
       button.disabled = true
       result.textContent = '보정 중…'
       result.className = 'cal-result'
@@ -440,11 +439,7 @@
         const response = await fetch('/api/calibrate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            actual_distance_m: actual,
-            label,
-            dimension: 'height',
-          }),
+          body: JSON.stringify({ actual_distance_m: actual }),
         })
         const data = await response.json()
         if (!response.ok) {
@@ -453,10 +448,10 @@
           return
         }
         result.textContent =
-          `적용됨: ${data.label} · focal ${fmt(data.focal_px, 0)} px · FOV ${fmt(data.fov_deg, 1)}°`
+          `적용됨: 눈 ${fmt(data.eye_distance_px, 0)} px · IPD ${fmt(data.ipd_scale_px_m, 1)} px·m · depth x${fmt(data.depth_scale, 3)}`
         result.className = 'cal-result good'
         const env = document.getElementById('cal-env')
-        env.textContent = `${data.recommended_env}  # .env에 추가 후 재시작`
+        env.textContent = `${data.recommended_env}\n# .env에 추가 후 재시작`
         env.style.display = 'block'
         refresh()
       } catch (error) {
