@@ -20,6 +20,27 @@ cp .env.example .env
 uv run neurovector-vision   # http://localhost:8082
 ```
 
+## NVIDIA GPU와 OpenCV
+
+이 환경의 OpenCV는 NVIDIA OpenCL 장치를 사용할 수 있습니다. OpenCV에서 OpenCL을 쓰려면
+지원되는 영상 연산에 `cv2.UMat`을 사용하고 OpenCL을 켭니다. NumPy 배열만 받는 함수는
+`UMat.get()`으로 CPU 배열로 변환하세요.
+
+```python
+import cv2
+
+cv2.ocl.setUseOpenCL(True)
+device = cv2.ocl.Device.getDefault()
+print("OpenCL:", cv2.ocl.haveOpenCL() and cv2.ocl.useOpenCL())
+print("Device:", device.name() if device.available() else "none")
+
+gpu_frame = cv2.UMat(frame)  # OpenCL 지원 OpenCV 연산에 GPU 메모리 사용
+gpu_blurred = cv2.GaussianBlur(gpu_frame, (5, 5), 0)
+blurred = gpu_blurred.get()  # NumPy 배열이 필요한 코드에 전달
+```
+
+RTX 3050 GPU 사용량은 앱 목록의 **RTX 3050 GPU Monitor**에서 확인할 수 있습니다.
+
 API 문서: http://localhost:8082/docs
 
 ## 카메라 테스트 UI
@@ -36,12 +57,18 @@ uv run --extra vision python tools/camera_ui.py
 - 감지 박스, 클래스, confidence, 추정 거리, 추론 시간/FPS 를 표시합니다.
 - `--camera` 로 V4L2 인덱스를, `--model` 로 가중치 경로를 지정할 수 있습니다.
 - 기본 모델 `yolov8n.pt` 는 첫 실행 시 자동 다운로드됩니다.
+- 화면에서 **Distance Calibration** 에 실제 거리를 입력하면 초점 거리를 바로
+  보정할 수 있습니다. 보정값은 실행 중에만 적용되며, 유지하려면 표시되는
+  `NEUROVECTOR_CAMERA_FOCAL_LENGTH_PX` 를 `.env` 에 넣고 재시작하세요.
 - 운영 API 가 아니며, 로컬 카메라/모델/거리 추정 확인용입니다.
 
 ```bash
 # 다른 카메라 + 사용자 학습 모델
 uv run --extra vision python tools/camera_ui.py \
   --camera 0 --model runs/detect/obstacles/weights/best.pt --port 8090
+
+# 보정된 초점 거리로 시작
+uv run --extra vision python tools/camera_ui.py --focal 812.5
 ```
 
 ## API
@@ -65,7 +92,8 @@ curl -F "file=@sample.jpg" http://localhost:8082/detect
       "label": "person",
       "confidence": 0.91,
       "box": {"x1": 100, "y1": 80, "x2": 180, "y2": 260},
-      "distance_m": 12.4
+      "distance_m": 12.4,
+      "distance_note": null
     }
   ],
   "forwarded": 1,
@@ -74,7 +102,9 @@ curl -F "file=@sample.jpg" http://localhost:8082/detect
 ```
 
 `ultralytics` 가 설치되지 않은 환경에서는 `/detect` 가 `503` 을 반환합니다.
-크기 정보가 없는 클래스는 `distance_m` 이 `null` 이 됩니다.
+크기 정보가 없는 클래스, 화면 경계에 잘린 객체, 너비/높이 형상이 크게
+어긋나는 객체는 `distance_m` 이 `null` 이 되고 `distance_note` 에 사유가
+들어갑니다. 잘못된 거리를 표시하는 것보다 `null` 을 반환하는 편이 안전합니다.
 
 ## 거리 추정
 
@@ -90,10 +120,14 @@ focal_px   = image_width_px / (2 * tan(horizontal_fov_deg / 2))
   덮어쓸 수 있습니다. 이 값이 있으면 FOV 는 사용하지 않습니다.
 - 클래스별 실제 너비/높이는 기본 표(`distance.py`)에 있고,
   `NEUROVECTOR_OBJECT_SIZES` JSON 으로 덮어쓰거나 새 클래스를 추가할 수 있습니다.
-- 너비/높이 추정값 중 **더 가까운 값**을 사용합니다. 장애물 회피에서는 거리
-  과대평가보다 과소평가가 안전하기 때문입니다.
-- 바운딩 박스가 잘리거나 객체가 기울어져 있으면 오차가 커집니다. 안전 임계값은
-  여유 있게 잡으세요.
+- 너비와 높이가 모두 신뢰 가능하면 두 거리의 **기하평균(면적 기반)** 을 사용합니다.
+  두 값이 `NEUROVECTOR_DISTANCE_MIN_AXIS_AGREEMENT` 보다 크게 어긋나면 객체가
+  부분적으로 가려졌거나 형상이 다른 것으로 보고 거리를 버립니다.
+- 바운딩 박스가 화면 경계에서 `NEUROVECTOR_DISTANCE_EDGE_MARGIN_RATIO` 안쪽에
+  닿으면 잘린 것으로 보고 해당 축을 사용하지 않습니다. 양쪽 축이 모두 잘리면
+  `distance_m` 은 `null` 입니다.
+- 단안 방식은 객체의 전체 형상이 보이고 실제 크기를 알 때만 정확합니다. 사람의
+  머리만 보이거나 차량 일부만 보이는 경우 거리를 표시하지 않습니다.
 
 `NEUROVECTOR_OBJECT_SIZES` 예시:
 
@@ -109,11 +143,27 @@ export NEUROVECTOR_OBJECT_SIZES='{
 
 ### 카메라 캘리브레이션
 
-1. 실제 크기를 아는 객체(예: 1.7 m 사람)를 알려진 거리(예: 20 m)에 세웁니다.
-2. 해당 객체의 바운딩 박스 높이를 픽셀로 측정합니다.
-3. `focal_px = distance_m * bbox_height_px / real_height_m` 로 초점 거리를 계산합니다.
-4. `NEUROVECTOR_CAMERA_FOCAL_LENGTH_PX` 에 넣고 다른 거리에서 검증합니다.
-5. 해상도가 바뀌면 초점 거리도 비례해서 바뀌므로, FOV 방식이 더 편할 수 있습니다.
+카메라 UI의 **Distance Calibration** 을 사용하는 방법이 가장 빠릅니다.
+
+1. 실제 크기를 아는 객체(예: 1.7 m 사람)의 **전체 모습**을 화면에 담습니다.
+2. 감지된 객체의 실제 거리를 줄자로 잽니다.
+3. UI의 Distance Calibration 에 실제 거리를 입력하고 **보정 적용**을 누릅니다.
+4. 표시되는 `NEUROVECTOR_CAMERA_FOCAL_LENGTH_PX` 를 `.env` 에 넣고 재시작합니다.
+5. 다른 거리에서 다시 측정해 오차를 확인합니다.
+
+수동 계산은 다음과 같습니다.
+
+```text
+focal_px = actual_distance_m * bbox_height_px / real_height_m
+```
+
+- 해상도가 바뀌면 초점 거리도 비례해서 바뀝니다.
+- 기준 객체는 화면 경계에 잘리지 않아야 하며, 가능한 한 가까이 두고 크게
+  보이는 상태에서 보정하는 것이 픽셀 오차에 유리합니다.
+- 보정은 기본 크기 표의 실제 크기를 기준으로 합니다. 예를 들어 기준 사람의 키가
+  1.8 m 라면 먼저 `NEUROVECTOR_OBJECT_SIZES='{"person":{"width_m":0.5,"height_m":1.8}}'`
+  처럼 실제 크기를 맞춘 뒤 보정하세요.
+- 보정 후에도 객체가 부분적으로 가려지거나 기울어지면 거리 오차가 커집니다.
 
 ## 새 장애물 클래스 추가 (YOLO 파인튜닝)
 
@@ -199,5 +249,7 @@ uv run ruff format .
 | `NEUROVECTOR_IOU_THRESHOLD` | `0.45` |
 | `NEUROVECTOR_CAMERA_HORIZONTAL_FOV_DEG` | `70.0` |
 | `NEUROVECTOR_CAMERA_FOCAL_LENGTH_PX` | (없음, FOV 사용) |
+| `NEUROVECTOR_DISTANCE_MIN_AXIS_AGREEMENT` | `0.6` |
+| `NEUROVECTOR_DISTANCE_EDGE_MARGIN_RATIO` | `0.02` |
 | `NEUROVECTOR_OBJECT_SIZES` | `{}` (기본 크기 표 사용) |
 | `NEUROVECTOR_DRONE_ID` | `drone-001` |

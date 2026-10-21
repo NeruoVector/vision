@@ -19,6 +19,8 @@ class Detection(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     box: BoundingBox
     distance_m: float | None = Field(default=None, ge=0.0)
+    # 거리를 계산하지 못한 사유 (예: bbox_truncated, inconsistent_axes).
+    distance_note: str | None = None
 
 
 class DetectionRequest(BaseModel):
