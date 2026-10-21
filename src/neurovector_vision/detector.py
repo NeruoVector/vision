@@ -17,6 +17,29 @@ class VisionBackendUnavailable(RuntimeError):
     """ultralytics / opencv 미설치 시 발생."""
 
 
+class InvalidImage(ValueError):
+    """이미지 바이트를 해석할 수 없을 때 발생."""
+
+
+def _decode_image_bytes(image: bytes):
+    """업로드 바이트를 Ultralytics 가 받는 BGR ndarray 로 변환한다."""
+    try:
+        import cv2
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - 환경 의존
+        raise VisionBackendUnavailable(
+            "opencv/numpy 가 설치되어 있지 않습니다. `uv sync --extra vision` 으로 설치하세요."
+        ) from exc
+
+    if not image:
+        raise InvalidImage("빈 이미지입니다.")
+
+    array = cv2.imdecode(np.frombuffer(image, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if array is None:
+        raise InvalidImage("이미지 바이트를 해석할 수 없습니다.")
+    return array
+
+
 class ObstacleDetector:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -43,13 +66,8 @@ class ObstacleDetector:
 
     def detect(self, image: str | Path | bytes) -> list[Detection]:
         """이미지 경로 또는 바이트를 받아 감지 결과를 반환한다."""
+        source = _decode_image_bytes(image) if isinstance(image, bytes) else image
         model = self._load_model()
-
-        source = image
-        if isinstance(image, bytes):
-            import io
-
-            source = io.BytesIO(image)
 
         results = model.predict(
             source=source,
