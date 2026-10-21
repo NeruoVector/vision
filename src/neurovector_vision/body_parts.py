@@ -83,6 +83,23 @@ def _box_from_points(
     return BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
 
 
+def _extend_from(
+    origin: tuple[float, float, float],
+    target: tuple[float, float, float],
+    distance_px: float,
+) -> tuple[float, float]:
+    """origin→target 방향으로 target 너머 distance_px 만큼 연장한 점."""
+    delta_x = target[0] - origin[0]
+    delta_y = target[1] - origin[1]
+    length = math.hypot(delta_x, delta_y)
+    if length < 1e-6:
+        return target[0], target[1]
+    return (
+        target[0] + delta_x / length * distance_px,
+        target[1] + delta_y / length * distance_px,
+    )
+
+
 def _point_box(
     point: tuple[float, float, float],
     image_width: int,
@@ -205,13 +222,25 @@ def body_parts_from_keypoints(
                     )
                 )
         if _valid(wrist, min_confidence):
-            box = _point_box(wrist, image_width, image_height, hand_width, hand_height)
+            # 손은 손목에서 팔 방향으로 뻗어 있으므로 손목 중심보다 조금 바깥을
+            # 박스 중심으로 잡아야 손바닥/손가락이 박스에 더 잘 들어온다.
+            if _valid(elbow, min_confidence):
+                hand_center = _extend_from(elbow, wrist, hand_height * 0.35)
+            else:
+                hand_center = (wrist[0], wrist[1])
+            box = _point_box(
+                (hand_center[0], hand_center[1], wrist[2]),
+                image_width,
+                image_height,
+                hand_width,
+                hand_height,
+            )
             if box is not None:
                 add(
                     BodyPart(
                         label=f"{side}_hand",
                         box=box,
-                        points=((wrist[0], wrist[1]),),
+                        points=((wrist[0], wrist[1]), hand_center),
                         radius_px=max(5.0, hand_width * 0.30),
                     )
                 )
@@ -239,13 +268,23 @@ def body_parts_from_keypoints(
                     )
                 )
         if _valid(ankle, min_confidence):
-            box = _point_box(ankle, image_width, image_height, foot_width, foot_height)
+            if _valid(knee, min_confidence):
+                foot_center = _extend_from(knee, ankle, foot_height * 0.5)
+            else:
+                foot_center = (ankle[0], ankle[1])
+            box = _point_box(
+                (foot_center[0], foot_center[1], ankle[2]),
+                image_width,
+                image_height,
+                foot_width,
+                foot_height,
+            )
             if box is not None:
                 add(
                     BodyPart(
                         label=f"{side}_foot",
                         box=box,
-                        points=((ankle[0], ankle[1]),),
+                        points=((ankle[0], ankle[1]), foot_center),
                         radius_px=max(4.0, foot_width * 0.30),
                     )
                 )
