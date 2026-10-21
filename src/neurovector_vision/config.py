@@ -24,10 +24,29 @@ class Settings(BaseSettings):
     backend_base_url: str = "http://localhost:8081"
     backend_timeout_seconds: float = 5.0
 
-    # 모델
-    model_path: str = "yolov8n.pt"
+    # 모델 / 추론 장치
+    model_path: str = "yolo26n.pt"
+    face_model_path: str = "yolo26n-pose.pt"
+    depth_model_path: str = "yolo26n-depth.pt"
+    device: str = "auto"
     confidence_threshold: float = 0.35
     iou_threshold: float = 0.45
+    depth_enabled: bool = True
+    depth_imgsz: int = Field(default=768, ge=320, le=1280)
+    depth_min_m: float = Field(default=0.05, gt=0.0)
+    depth_max_m: float = Field(default=150.0, gt=0.0)
+    # 수동 보정으로 저장되는 깊이 모델 스케일. 1.0이면 모델 출력 그대로 사용.
+    depth_scale: float = Field(default=1.0, gt=0.0, le=10.0)
+
+    # 얼굴 키포인트 기반 거리 (근거리)
+    face_ipd_m: float = Field(default=0.063, gt=0.0)
+    face_head_width_m: float = Field(default=0.15, gt=0.0)
+    face_keypoint_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    face_ipd_scale_px_m: float | None = Field(default=None, gt=0.0)
+    face_min_eye_distance_px: float = Field(default=8.0, gt=0.0)
+
+    # 체커보드로 만든 camera_calibration.json 경로 (없으면 FOV 사용)
+    camera_calibration_path: str = "camera_calibration.json"
 
     # 단안 거리 추정 (카메라 캘리브레이션)
     # camera_focal_length_px 가 있으면 FOV 대신 이 값을 사용한다.
@@ -46,6 +65,18 @@ class Settings(BaseSettings):
     @property
     def backend_detections_url(self) -> str:
         return f"{self.backend_base_url.rstrip('/')}/api/v1/detections"
+
+    @property
+    def resolved_device(self) -> str:
+        """``auto`` 이면 CUDA 사용 가능 여부에 따라 GPU/CPU를 고른다."""
+        device = self.device.strip()
+        if device and device.lower() != "auto":
+            return device
+        try:
+            import torch
+        except ImportError:
+            return "cpu"
+        return "0" if torch.cuda.is_available() else "cpu"
 
     @property
     def resolved_object_sizes(self) -> dict[str, ObjectSize]:

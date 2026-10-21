@@ -1,8 +1,8 @@
-"""로컬 카메라 + YOLO 실시간 프리뷰 테스트 UI.
+"""로컬 카메라 + YOLO26 얼굴 감지 실시간 테스트 UI.
 
-브라우저에서 ``http://localhost:8090`` 을 열면 카메라 영상과 감지 박스,
-클래스별 거리, 추론 시간/FPS 를 볼 수 있다. 운영 API 가 아니라 로컬
-카메라/모델/거리 추정을 빠르게 확인하기 위한 개발 도구다.
+브라우저에서 ``http://localhost:8090`` 을 열면 카메라 영상과 얼굴 박스,
+얼굴까지의 거리, 깊이 모델/키포인트 거리, 추론 시간/FPS 를 볼 수 있다.
+운영 API 가 아니라 로컬 카메라/모델/거리 보정을 빠르게 확인하는 개발 도구다.
 
 실행:
     uv run --extra vision python tools/camera_ui.py
@@ -29,16 +29,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from neurovector_vision.camera_calibration import CameraCalibration
 from neurovector_vision.config import Settings
-from neurovector_vision.detector import ObstacleDetector
-from neurovector_vision.distance import (
-    focal_length_from_reference,
-    horizontal_fov_deg,
-)
+from neurovector_vision.distance import horizontal_fov_deg
+from neurovector_vision.face_detector import FaceDistanceDetector
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from neurovector_vision.face_detector import FaceMeasurement
     from neurovector_vision.models import Detection
 
 logger = logging.getLogger(__name__)
@@ -48,18 +47,24 @@ HTML = Path(__file__).with_name("camera_ui.html").read_text(encoding="utf-8")
 @dataclass(frozen=True)
 class CameraConfig:
     camera_index: int = 0
-    model_path: str = "yolov8n.pt"
+    face_model_path: str = "yolo26n-pose.pt"
+    depth_model_path: str = "yolo26n-depth.pt"
     width: int = 1280
     height: int = 720
     port: int = 8090
     host: str = "127.0.0.1"
     fov: float = 70.0
     focal_length_px: float | None = None
+    face_ipd_scale_px_m: float | None = None
+    calibration_path: str = "camera_calibration.json"
+    depth_enabled: bool = True
+    device: str = "auto"
     mirror: bool = True
 
 
 class CalibrationRequest(BaseModel):
     actual_distance_m: float = Field(gt=0.0)
+    # 이전 UI/클라이언트와의 호환을 위해 받지만 얼굴 보정에는 사용하지 않는다.
     label: str | None = None
     dimension: str = "height"
 
@@ -67,16 +72,25 @@ class CalibrationRequest(BaseModel):
 class CameraPipeline:
     def __init__(self, config: CameraConfig) -> None:
         self._config = config
+        self._calibration = CameraCalibration.load(config.calibration_path)
+        focal_override = config.focal_length_px
+        if focal_override is None and self._calibration is not None:
+            focal_override = self._calibration.focal_px
         self._settings = Settings(
             _env_file=None,
-            model_path=config.model_path,
+            face_model_path=config.face_model_path,
+            depth_model_path=config.depth_model_path,
+            depth_enabled=config.depth_enabled,
+            device=config.device,
             camera_horizontal_fov_deg=config.fov,
-            camera_focal_length_px=config.focal_length_px,
+            camera_focal_length_px=focal_override,
+            face_ipd_scale_px_m=config.face_ipd_scale_px_m,
         )
-        self._detector = ObstacleDetector(self._settings)
+        self._detector = FaceDistanceDetector(self._settings)
         self._condition = threading.Condition()
-        self._latest_jpeg = self._placeholder("Preparing camera and model...")
+        self._latest_jpeg = self._placeholder("Preparing YOLO26 and camera...")
         self._snapshot_jpeg = self._latest_jpeg
+        self._last_measurements: list[FaceMeasurement] = []
         self._last_detections: list[Detection] = []
         self._status: dict = {
             "ok": False,
@@ -84,10 +98,24 @@ class CameraPipeline:
             "frames": 0,
             "fps": 0.0,
             "inference_ms": None,
+            "depth_ms": None,
             "detections": [],
             "nearest_distance_m": None,
             "focal_px": None,
             "fov_deg": None,
+            "face_scale_px_m": None,
+            "depth_scale": self._detector.depth_scale,
+            "depth_enabled": self._detector.depth_enabled,
+            "depth_error": None,
+            "model": Path(config.face_model_path).name,
+            "device": self._settings.resolved_device,
+            "calibration": {
+                "loaded": self._calibration is not None,
+                "path": config.calibration_path,
+                "reprojection_error": (
+                    self._calibration.reprojection_error if self._calibration is not None else None
+                ),
+            },
             "camera": {"ok": False, "width": 0, "height": 0, "error": None},
             "updated_at": None,
         }
@@ -171,6 +199,9 @@ class CameraPipeline:
             }
             self._status["focal_px"] = focal_px
             self._status["fov_deg"] = fov_deg
+            self._status["face_scale_px_m"] = (
+                round(self._detector.ipd_scale_px_m(actual_width), 2) if actual_width > 0 else None
+            )
             self._condition.notify_all()
 
         if not capture.isOpened():
@@ -179,9 +210,11 @@ class CameraPipeline:
 
         try:
             # 첫 요청에서 모델 로딩 지연이 발생하지 않도록 미리 준비한다.
-            self._detector._load_model()
+            self._detector.warmup()
             with self._condition:
                 self._latest_jpeg = self._placeholder("Waiting for the first frame...")
+                self._status["depth_error"] = self._detector.last_depth_error
+                self._status["depth_enabled"] = self._detector.depth_enabled
                 self._condition.notify_all()
 
             while self._running:
@@ -191,12 +224,15 @@ class CameraPipeline:
                     continue
 
                 started = time.perf_counter()
+                if self._calibration is not None:
+                    frame = self._calibration.undistort(frame)
                 if self._config.mirror:
                     frame = cv2.flip(frame, 1)
                 ok, raw = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
                 if not ok:
                     continue
-                detections = self._detector.detect(raw.tobytes())
+                measurements = self._detector.detect_measurements(raw.tobytes())
+                detections = [measurement.detection for measurement in measurements]
                 inference_ms = (time.perf_counter() - started) * 1000.0
 
                 annotated = self._draw(frame.copy(), detections)
@@ -223,19 +259,33 @@ class CameraPipeline:
                 )
                 payload = [
                     {
-                        "label": detection.label,
-                        "confidence": round(detection.confidence, 4),
-                        "distance_m": detection.distance_m,
-                        "distance_note": detection.distance_note,
-                        "box": detection.box.model_dump(),
+                        "label": measurement.detection.label,
+                        "confidence": round(measurement.detection.confidence, 4),
+                        "distance_m": measurement.detection.distance_m,
+                        "distance_note": measurement.detection.distance_note,
+                        "box": measurement.detection.box.model_dump(),
+                        "keypoint_distance_m": measurement.keypoint_distance_m,
+                        "depth_distance_m": measurement.depth_distance_m,
+                        "distance_source": measurement.distance_source,
+                        "eye_distance_px": (
+                            round(measurement.eye_distance_px, 1)
+                            if measurement.eye_distance_px is not None
+                            else None
+                        ),
                     }
-                    for detection in detections
+                    for measurement in measurements
                 ]
                 focal_px, fov_deg = self._intrinsics(actual_width)
+                face_scale = (
+                    round(self._detector.ipd_scale_px_m(actual_width), 2)
+                    if actual_width > 0
+                    else None
+                )
 
                 with self._condition:
                     self._latest_jpeg = encoded.tobytes()
                     self._snapshot_jpeg = self._latest_jpeg
+                    self._last_measurements = measurements
                     self._last_detections = detections
                     self._status.update(
                         {
@@ -244,12 +294,21 @@ class CameraPipeline:
                             "frames": self._status["frames"] + 1,
                             "fps": round(fps, 2),
                             "inference_ms": round(inference_ms, 1),
+                            "depth_ms": (
+                                round(self._detector.last_depth_ms, 1)
+                                if self._detector.last_depth_ms is not None
+                                else None
+                            ),
                             "detections": payload,
                             "nearest_distance_m": (
                                 round(nearest, 2) if nearest is not None else None
                             ),
                             "focal_px": focal_px,
                             "fov_deg": fov_deg,
+                            "face_scale_px_m": face_scale,
+                            "depth_scale": round(self._detector.depth_scale, 3),
+                            "depth_enabled": self._detector.depth_enabled,
+                            "depth_error": self._detector.last_depth_error,
                             "camera": {
                                 "ok": True,
                                 "width": actual_width,
@@ -315,70 +374,32 @@ class CameraPipeline:
         label: str | None = None,
         dimension: str = "height",
     ) -> dict:
-        """현재 감지된 기준 객체로 초점 거리를 보정한다."""
-        if dimension not in {"width", "height"}:
-            raise ValueError("dimension must be 'width' or 'height'")
-        if actual_distance_m <= 0.0:
-            raise ValueError("actual_distance_m must be positive")
-
+        """현재 가장 큰 얼굴의 실제 거리로 얼굴 IPD/깊이 스케일을 보정한다."""
+        del dimension  # 얼굴 보정은 눈 간격만 사용한다.
         with self._condition:
-            detections = copy.deepcopy(self._last_detections)
+            measurements = copy.deepcopy(self._last_measurements)
             image_width = int(self._status["camera"]["width"])
-            image_height = int(self._status["camera"]["height"])
 
-        if image_width <= 0 or image_height <= 0:
+        if image_width <= 0:
             raise ValueError("카메라 해상도를 알 수 없습니다.")
-
-        candidates = [detection for detection in detections if detection.distance_m is not None]
+        candidates = measurements
         if label:
             wanted = label.strip().lower()
             candidates = [
-                detection for detection in candidates if detection.label.strip().lower() == wanted
+                item for item in candidates if item.detection.label.strip().lower() == wanted
             ]
         if not candidates:
-            raise ValueError("보정할 수 있는 신뢰 가능한 감지가 없습니다.")
+            raise ValueError("보정할 얼굴이 감지되지 않았습니다.")
 
-        # 픽셀 오차를 줄이기 위해 가장 큰(가까운) 바운딩 박스를 사용한다.
-        detection = max(
+        # 픽셀 오차를 줄이기 위해 가장 큰(가까운) 얼굴을 사용한다.
+        measurement = max(
             candidates,
-            key=lambda item: (item.box.x2 - item.box.x1) * (item.box.y2 - item.box.y1),
+            key=lambda item: (
+                (item.detection.box.x2 - item.detection.box.x1)
+                * (item.detection.box.y2 - item.detection.box.y1)
+            ),
         )
-        size = self._settings.resolved_object_sizes.get(detection.label.strip().lower())
-        if size is None:
-            raise ValueError(f"'{detection.label}' 클래스의 실제 크기 정보가 없습니다.")
-
-        margin_x = max(2.0, image_width * self._settings.distance_edge_margin_ratio)
-        margin_y = max(2.0, image_height * self._settings.distance_edge_margin_ratio)
-        if dimension == "width":
-            if detection.box.x1 <= margin_x or detection.box.x2 >= image_width - margin_x:
-                raise ValueError("객체 너비가 화면 경계에서 잘려 보정할 수 없습니다.")
-            bbox_dimension = detection.box.x2 - detection.box.x1
-            real_dimension = size.width_m
-        else:
-            if detection.box.y1 <= margin_y or detection.box.y2 >= image_height - margin_y:
-                raise ValueError("객체 높이가 화면 경계에서 잘려 보정할 수 없습니다.")
-            bbox_dimension = detection.box.y2 - detection.box.y1
-            real_dimension = size.height_m
-
-        previous_focal = self._detector.focal_px(image_width)
-        focal = focal_length_from_reference(
-            actual_distance_m,
-            bbox_dimension,
-            real_dimension,
-        )
-        self._detector.set_focal_length_px(focal)
-        with self._condition:
-            self._condition.notify_all()
-
-        return {
-            "label": detection.label,
-            "dimension": dimension,
-            "actual_distance_m": round(actual_distance_m, 2),
-            "previous_focal_px": round(previous_focal, 2),
-            "focal_px": round(focal, 2),
-            "fov_deg": round(horizontal_fov_deg(image_width, focal), 2),
-            "recommended_env": f"NEUROVECTOR_CAMERA_FOCAL_LENGTH_PX={focal:.2f}",
-        }
+        return self._detector.calibrate(actual_distance_m, measurement, image_width)
 
     def latest(self) -> bytes:
         with self._condition:
@@ -472,34 +493,61 @@ def parse_args() -> CameraConfig:
     settings = Settings(_env_file=None)
     parser = argparse.ArgumentParser(description="NeuroVector local camera test UI")
     parser.add_argument("--camera", type=int, default=0, help="V4L2 camera index")
-    parser.add_argument("--model", default=settings.model_path, help="YOLO weights path")
+    parser.add_argument(
+        "--model",
+        default=settings.face_model_path,
+        help="YOLO26 pose weights for face keypoints",
+    )
+    parser.add_argument(
+        "--depth-model",
+        default=settings.depth_model_path,
+        help="YOLO26 depth weights",
+    )
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--device", default=settings.device, help="'auto', '0', or 'cpu'")
+    parser.add_argument(
+        "--calibration",
+        default=settings.camera_calibration_path,
+        help="checkerboard camera calibration JSON",
+    )
     parser.add_argument(
         "--fov",
         type=float,
         default=settings.camera_horizontal_fov_deg,
-        help="horizontal FOV (degrees)",
+        help="horizontal FOV (degrees), used when no calibration/focal is set",
     )
     parser.add_argument(
         "--focal",
         type=float,
         default=settings.camera_focal_length_px,
-        help="calibrated focal length in pixels (overrides --fov)",
+        help="calibrated focal length in pixels (overrides FOV)",
     )
+    parser.add_argument(
+        "--face-scale",
+        type=float,
+        default=settings.face_ipd_scale_px_m,
+        help="calibrated face IPD scale (m*px)",
+    )
+    parser.add_argument("--no-depth", action="store_true", help="disable YOLO26-depth")
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--no-mirror", action="store_true", help="disable selfie mirror")
     args = parser.parse_args()
     return CameraConfig(
         camera_index=args.camera,
-        model_path=args.model,
+        face_model_path=args.model,
+        depth_model_path=args.depth_model,
         width=args.width,
         height=args.height,
         port=args.port,
         host=args.host,
         fov=args.fov,
         focal_length_px=args.focal,
+        face_ipd_scale_px_m=args.face_scale,
+        calibration_path=args.calibration,
+        depth_enabled=not args.no_depth,
+        device=args.device,
         mirror=not args.no_mirror,
     )
 

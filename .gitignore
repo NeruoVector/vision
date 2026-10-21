@@ -13,5 +13,6 @@ wheels/
 *.pt
 runs/
 
-# 환경 변수
+# 환경 변수 / 로컬 카메라 캘리브레이션
 .env
+camera_calibration.json

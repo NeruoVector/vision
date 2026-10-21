@@ -3,9 +3,9 @@
 핀홀 카메라 근사식 ``distance_m = real_dimension_m * focal_px / bbox_dimension_px``
 를 사용한다. 초점 거리는 수평 화각(FOV) 또는 명시적 픽셀 값을 사용한다.
 
-단안 거리 추정은 객체의 **전체 형상**이 보일 때만 의미가 있다. 화면 경계에
-잘린 객체나 너비/높이 추정값이 크게 어긋나는 객체는 잘못된 거리를 표시하지
-않도록 ``None`` 과 사유를 반환한다.
+일반 객체는 전체 형상이 보일 때 가장 정확하다. 주 축이 화면 경계에서 잘리면
+보조 축으로 근사하고 ``approximate_bbox_truncated`` 사유를 붙인다. 얼굴 근거리는
+별도의 :class:`FaceDistanceEstimator` 가 눈/귀 키포인트로 계산한다.
 """
 
 from __future__ import annotations
@@ -57,6 +57,9 @@ DEFAULT_EDGE_MARGIN_RATIO = 0.02
 # 높이가 이 값 이상인 객체는 높이를 거리 추정의 주 축으로 사용한다.
 # 사람/차량처럼 세로 형상이 안정적인 객체의 너비는 자세에 따라 크게 변한다.
 PRIMARY_HEIGHT_MIN_M = 0.5
+# 관측된 바운딩 박스 종횡비가 기대값에서 이 배수 이상 벗어나면
+# 전체 객체가 아니라 일부만 보이는 것으로 본다.
+MAX_ASPECT_RATIO = 5.0
 
 
 @dataclass(frozen=True)
@@ -193,32 +196,194 @@ class DistanceEstimator:
         if not width_reliable and not height_reliable:
             return DistanceEstimate(None, "bbox_truncated")
 
-        # 주 축이 잘렸다면 보조 축만으로 거리를 만들지 않는다. 예를 들어
-        # 사람의 다리가 화면 아래로 잘린 상태에서 어깨 너비만으로 거리를
-        # 추정하면 자세에 따라 크게 틀릴 수 있다.
-        if size.height_m >= PRIMARY_HEIGHT_MIN_M:
-            if not height_reliable:
-                return DistanceEstimate(None, "bbox_truncated")
-        elif not width_reliable:
-            return DistanceEstimate(None, "bbox_truncated")
+        primary_is_height = size.height_m >= PRIMARY_HEIGHT_MIN_M
+        primary_reliable = height_reliable if primary_is_height else width_reliable
+        secondary_reliable = width_reliable if primary_is_height else height_reliable
+
+        # 양쪽 축이 모두 온전할 때만 종횡비를 검사한다. 한 축이라도 잘렸으면
+        # 종횡비 자체가 실제 객체 형상을 반영하지 못한다.
+        if width_reliable and height_reliable:
+            expected_aspect = size.width_m / size.height_m
+            observed_aspect = box_width / box_height
+            aspect_ratio = observed_aspect / expected_aspect
+            if aspect_ratio > MAX_ASPECT_RATIO or aspect_ratio < 1.0 / MAX_ASPECT_RATIO:
+                return DistanceEstimate(None, "inconsistent_axes")
 
         width_estimate = size.width_m * focal / box_width if width_reliable else None
         height_estimate = size.height_m * focal / box_height if height_reliable else None
 
-        if width_estimate is None:
-            distance = height_estimate
-        elif height_estimate is None:
-            distance = width_estimate
+        if primary_reliable:
+            distance = height_estimate if primary_is_height else width_estimate
+            note = None
+            if secondary_reliable:
+                secondary = width_estimate if primary_is_height else height_estimate
+                if distance is not None and secondary is not None:
+                    agreement = min(distance, secondary) / max(distance, secondary)
+                    if agreement < self._min_axis_agreement:
+                        note = "approximate_axis_mismatch"
         else:
-            agreement = min(width_estimate, height_estimate) / max(
-                width_estimate,
-                height_estimate,
-            )
-            if agreement < self._min_axis_agreement:
-                return DistanceEstimate(None, "inconsistent_axes")
-            # 두 축이 모두 신뢰 가능할 때는 면적 기반 기하평균을 사용한다.
-            distance = math.sqrt(width_estimate * height_estimate)
+            # 주 축이 화면 경계에서 잘린 경우 보조 축으로 근사한다.
+            # 사람의 다리가 잘린 상태의 어깨 너비처럼 오차가 있을 수 있다.
+            distance = width_estimate if primary_is_height else height_estimate
+            note = "approximate_bbox_truncated"
 
         if distance is None or not math.isfinite(distance) or distance <= 0.0:
             return DistanceEstimate(None, "invalid_distance")
+        return DistanceEstimate(round(distance, 2), note)
+
+
+# 성인 평균 눈동자 간 거리(IPD)와 머리 너비. 얼굴 근거리 거리 추정에 사용한다.
+DEFAULT_IPD_M = 0.063
+DEFAULT_HEAD_WIDTH_M = 0.15
+
+
+class FaceDistanceEstimator:
+    """얼굴 키포인트(눈/귀)로 근거리 거리를 추정한다.
+
+    눈 사이 픽셀 거리는 얼굴 크기와 무관하게 거리에 반비례하므로, 바운딩
+    박스가 화면 경계에 잘려도 거리를 계산할 수 있다. ``ipd_scale_px_m`` 는
+    ``실제 거리(m) × 눈 간격(px)`` 로 보정되는 값이다.
+    """
+
+    def __init__(
+        self,
+        *,
+        horizontal_fov_deg: float = 70.0,
+        focal_length_px: float | None = None,
+        ipd_m: float = DEFAULT_IPD_M,
+        head_width_m: float = DEFAULT_HEAD_WIDTH_M,
+        ipd_scale_px_m: float | None = None,
+        min_keypoint_confidence: float = 0.5,
+        min_eye_distance_px: float = 8.0,
+    ) -> None:
+        if ipd_m <= 0.0:
+            raise ValueError("ipd_m must be positive")
+        if head_width_m <= 0.0:
+            raise ValueError("head_width_m must be positive")
+        if ipd_scale_px_m is not None and ipd_scale_px_m <= 0.0:
+            raise ValueError("ipd_scale_px_m must be positive")
+        if not 0.0 <= min_keypoint_confidence <= 1.0:
+            raise ValueError("min_keypoint_confidence must be between 0 and 1")
+        if min_eye_distance_px <= 0.0:
+            raise ValueError("min_eye_distance_px must be positive")
+
+        self._horizontal_fov_deg = horizontal_fov_deg
+        self._focal_length_override = focal_length_px
+        self._ipd_m = ipd_m
+        self._head_width_m = head_width_m
+        self._ipd_scale_override = ipd_scale_px_m
+        self._min_keypoint_confidence = min_keypoint_confidence
+        self._min_eye_distance_px = min_eye_distance_px
+
+    @property
+    def ipd_scale_override(self) -> float | None:
+        return self._ipd_scale_override
+
+    def set_focal_length_px(self, focal_length_px: float | None) -> None:
+        if focal_length_px is not None and focal_length_px <= 0.0:
+            raise ValueError("focal_length_px must be positive")
+        self._focal_length_override = focal_length_px
+
+    def set_ipd_scale_px_m(self, ipd_scale_px_m: float | None) -> None:
+        """얼굴 거리 보정값을 적용한다. ``None`` 이면 FOV 기반으로 돌아간다."""
+        if ipd_scale_px_m is not None and ipd_scale_px_m <= 0.0:
+            raise ValueError("ipd_scale_px_m must be positive")
+        self._ipd_scale_override = ipd_scale_px_m
+
+    def _focal_px(self, image_width: int) -> float:
+        if self._focal_length_override is not None:
+            if self._focal_length_override <= 0.0:
+                raise ValueError("focal_length_px must be positive")
+            return self._focal_length_override
+        return focal_length_px(image_width, self._horizontal_fov_deg)
+
+    def ipd_scale_px_m(self, image_width: int) -> float:
+        """눈 간격(px)에 곱해 거리(m)를 만드는 스케일을 반환한다."""
+        if self._ipd_scale_override is not None:
+            return self._ipd_scale_override
+        return self._focal_px(image_width) * self._ipd_m
+
+    def focal_px(self, image_width: int) -> float:
+        """보정된 얼굴 스케일에서 역산한 초점 거리(픽셀)."""
+        return self.ipd_scale_px_m(image_width) / self._ipd_m
+
+    def calibrate_from_eyes(
+        self,
+        actual_distance_m: float,
+        eye_distance_px: float,
+    ) -> float:
+        """알려진 거리와 눈 간격으로 얼굴 거리 스케일을 보정한다."""
+        if actual_distance_m <= 0.0:
+            raise ValueError("actual_distance_m must be positive")
+        if eye_distance_px <= 0.0:
+            raise ValueError("eye_distance_px must be positive")
+        scale = actual_distance_m * eye_distance_px
+        self.set_ipd_scale_px_m(scale)
+        return scale
+
+    def _estimate_from_distance_px(
+        self,
+        reference_px: float,
+        scale_px_m: float,
+        *,
+        missing_note: str,
+        too_close_note: str,
+    ) -> DistanceEstimate:
+        if reference_px < self._min_eye_distance_px:
+            return DistanceEstimate(None, too_close_note)
+        if not math.isfinite(reference_px) or reference_px <= 0.0:
+            return DistanceEstimate(None, missing_note)
+        distance = scale_px_m / reference_px
+        if not math.isfinite(distance) or distance <= 0.0:
+            return DistanceEstimate(None, "invalid_distance")
         return DistanceEstimate(round(distance, 2))
+
+    def estimate_eyes(
+        self,
+        left_eye: tuple[float, float, float],
+        right_eye: tuple[float, float, float],
+        image_width: int,
+    ) -> DistanceEstimate:
+        """양쪽 눈 키포인트로 거리를 추정한다. 튜플은 ``(x, y, confidence)``."""
+        if (
+            left_eye[2] < self._min_keypoint_confidence
+            or right_eye[2] < self._min_keypoint_confidence
+        ):
+            return DistanceEstimate(None, "eye_keypoints_missing")
+        try:
+            scale = self.ipd_scale_px_m(image_width)
+        except ValueError:
+            return DistanceEstimate(None, "invalid_focal")
+        eye_px = math.hypot(left_eye[0] - right_eye[0], left_eye[1] - right_eye[1])
+        return self._estimate_from_distance_px(
+            eye_px,
+            scale,
+            missing_note="eye_keypoints_missing",
+            too_close_note="eye_keypoints_too_close",
+        )
+
+    def estimate_ears(
+        self,
+        left_ear: tuple[float, float, float],
+        right_ear: tuple[float, float, float],
+        image_width: int,
+    ) -> DistanceEstimate:
+        """눈이 가려졌을 때 귀 사이 거리로 거리를 추정한다."""
+        if (
+            left_ear[2] < self._min_keypoint_confidence
+            or right_ear[2] < self._min_keypoint_confidence
+        ):
+            return DistanceEstimate(None, "ear_keypoints_missing")
+        try:
+            ipd_scale = self.ipd_scale_px_m(image_width)
+        except ValueError:
+            return DistanceEstimate(None, "invalid_focal")
+        # 머리 너비 스케일은 IPD 스케일에서 비례식으로 구한다.
+        ear_scale = ipd_scale * self._head_width_m / self._ipd_m
+        ear_px = math.hypot(left_ear[0] - right_ear[0], left_ear[1] - right_ear[1])
+        return self._estimate_from_distance_px(
+            ear_px,
+            ear_scale,
+            missing_note="ear_keypoints_missing",
+            too_close_note="ear_keypoints_too_close",
+        )
