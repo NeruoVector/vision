@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from . import __version__
 from .backend import BackendClient
 from .config import Settings, get_settings
-from .detector import ObstacleDetector, VisionBackendUnavailable
+from .detector import InvalidImage, ObstacleDetector, VisionBackendUnavailable
 from .models import DetectResponse
 
 app = FastAPI(
@@ -42,6 +42,8 @@ async def detect(file: UploadFile) -> DetectResponse:
         detections = detector.detect(payload)
     except VisionBackendUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except InvalidImage as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     forwarded = await client.send_detections(settings.drone_id, detections)
     elapsed_ms = (time.perf_counter() - started) * 1000
