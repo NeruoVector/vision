@@ -69,5 +69,6 @@ def test_detector_marks_truncated_person_as_unreliable() -> None:
     detections = detector.detect(encoded.tobytes())
 
     assert detections[0].label == "person"
+    assert detections[0].priority_level == 1
     assert detections[0].distance_m is None
     assert detections[0].distance_note == "bbox_truncated"

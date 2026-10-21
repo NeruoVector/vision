@@ -34,6 +34,7 @@ class BackendClient:
                     latitude=latitude,
                     longitude=longitude,
                     distance_m=detection.distance_m,
+                    priority_level=detection.priority_level,
                 )
                 response = await client.post(self._url, json=payload.model_dump(mode="json"))
                 response.raise_for_status()

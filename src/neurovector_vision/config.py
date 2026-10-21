@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     face_keypoint_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     face_ipd_scale_px_m: float | None = Field(default=None, gt=0.0)
     face_min_eye_distance_px: float = Field(default=8.0, gt=0.0)
+    # YOLO26-pose 키포인트로 몸통/팔/손/다리/발까지 감지한다.
+    body_parts_enabled: bool = True
 
     # 체커보드로 만든 camera_calibration.json 경로 (없으면 FOV 사용)
     camera_calibration_path: str = "camera_calibration.json"
@@ -58,6 +60,8 @@ class Settings(BaseSettings):
     distance_edge_margin_ratio: float = Field(default=0.02, ge=0.0, lt=0.1)
     # JSON: {"my-obstacle": {"width_m": 1.2, "height_m": 0.8}}
     object_sizes: dict[str, ObjectSize] = Field(default_factory=dict)
+    # JSON: {"leaf": 3, "my-obstacle": 1} (1~3단계 우선순위 덮어쓰기)
+    priority_levels: dict[str, int] = Field(default_factory=dict)
 
     # 드론 식별자 (기체별로 배포 시 변경)
     drone_id: str = "drone-001"

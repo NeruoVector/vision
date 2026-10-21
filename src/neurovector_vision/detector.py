@@ -9,8 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import Settings
-from .distance import DistanceEstimator
+from .distance import CameraIntrinsics, DistanceEstimator
 from .models import BoundingBox, Detection
+from .priority import priority_level_for
 
 
 class VisionBackendUnavailable(RuntimeError):
@@ -93,6 +94,16 @@ class ObstacleDetector:
             # 원본 이미지 크기를 사용해야 리사이즈 후에도 초점 거리가 맞는다.
             image_width = int(result.orig_shape[1])
             image_height = int(result.orig_shape[0])
+            # 화면 가장자리의 광축 거리(Z)를 실제 직선거리로 보정한다.
+            try:
+                intrinsics = CameraIntrinsics.from_image(
+                    image_width,
+                    image_height,
+                    self._distance.focal_px(image_width),
+                )
+            except ValueError:
+                intrinsics = None
+            self._distance.set_camera_intrinsics(intrinsics)
             for box in result.boxes:
                 x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
                 label = str(names[int(box.cls[0])])
@@ -110,6 +121,10 @@ class ObstacleDetector:
                         box=bounding_box,
                         distance_m=estimate.distance_m,
                         distance_note=estimate.note,
+                        priority_level=priority_level_for(
+                            label,
+                            self._settings.priority_levels,
+                        ),
                     )
                 )
 

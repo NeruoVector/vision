@@ -2,6 +2,7 @@ import pytest
 
 from neurovector_vision.config import Settings
 from neurovector_vision.distance import (
+    CameraIntrinsics,
     DistanceEstimator,
     FaceDistanceEstimator,
     focal_length_from_reference,
@@ -189,3 +190,42 @@ def test_face_estimator_calibrates_from_known_distance() -> None:
     assert scale == pytest.approx(70.0)
     assert estimator.ipd_scale_px_m(640) == pytest.approx(70.0)
     assert estimator.estimate_eyes((0.0, 0.0, 0.9), (100.0, 0.0, 0.9), 640).distance_m == 0.7
+
+
+def test_camera_intrinsics_ray_factor_is_one_at_principal_point() -> None:
+    intrinsics = CameraIntrinsics.from_image(1280, 720, 1000.0)
+
+    assert intrinsics.ray_factor(640.0, 360.0) == pytest.approx(1.0)
+    assert intrinsics.ray_factor(1000.0, 100.0) > 1.0
+
+
+def test_distance_estimator_applies_diagonal_ray_correction() -> None:
+    estimator = DistanceEstimator(focal_length_px=1000.0)
+    box = BoundingBox(x1=590, y1=100, x2=890, y2=600)
+    image_width, image_height = 1280, 720
+    without_correction = estimator.estimate_detail(
+        "person",
+        box,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    estimator.set_camera_intrinsics(CameraIntrinsics.from_image(image_width, image_height, 1000.0))
+    with_correction = estimator.estimate_detail(
+        "person",
+        box,
+        image_width=image_width,
+        image_height=image_height,
+    )
+
+    assert without_correction.distance_m is not None
+    assert with_correction.distance_m is not None
+    assert with_correction.distance_m > without_correction.distance_m
+
+
+def test_face_calibration_divides_out_ray_factor() -> None:
+    estimator = FaceDistanceEstimator(focal_length_px=1000.0)
+
+    scale = estimator.calibrate_from_eyes(1.0, 63.0, ray_factor=1.1)
+
+    # 보정 시점의 사선 배율을 나눠 두어야 이후 추정값이 직선거리로 유지된다.
+    assert scale == pytest.approx(63.0 / 1.1)

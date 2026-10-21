@@ -21,6 +21,8 @@ class Detection(BaseModel):
     distance_m: float | None = Field(default=None, ge=0.0)
     # 거리를 계산하지 못한 사유 (예: bbox_truncated, inconsistent_axes).
     distance_note: str | None = None
+    # 1=얼굴/신체/동물, 2=차량/사물, 3=나뭇잎 등 저위험 자연물
+    priority_level: int = Field(default=2, ge=1, le=3)
 
 
 class DetectionRequest(BaseModel):
@@ -32,6 +34,7 @@ class DetectionRequest(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     distance_m: float | None = Field(default=None, ge=0.0)
+    priority_level: int = Field(default=2, ge=1, le=3)
     detected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
