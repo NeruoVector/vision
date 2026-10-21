@@ -22,6 +22,28 @@ uv run neurovector-vision   # http://localhost:8082
 
 API 문서: http://localhost:8082/docs
 
+## 카메라 테스트 UI
+
+로컬 카메라와 YOLO 감지 결과를 브라우저에서 바로 확인하는 개발용 도구입니다.
+서버가 카메라를 직접 열어 MJPEG 로 전송하므로 브라우저 카메라 권한은 필요 없습니다.
+
+```bash
+uv sync --extra vision
+uv run --extra vision python tools/camera_ui.py
+# http://127.0.0.1:8090
+```
+
+- 감지 박스, 클래스, confidence, 추정 거리, 추론 시간/FPS 를 표시합니다.
+- `--camera` 로 V4L2 인덱스를, `--model` 로 가중치 경로를 지정할 수 있습니다.
+- 기본 모델 `yolov8n.pt` 는 첫 실행 시 자동 다운로드됩니다.
+- 운영 API 가 아니며, 로컬 카메라/모델/거리 추정 확인용입니다.
+
+```bash
+# 다른 카메라 + 사용자 학습 모델
+uv run --extra vision python tools/camera_ui.py \
+  --camera 0 --model runs/detect/obstacles/weights/best.pt --port 8090
+```
+
 ## API
 
 | 메서드 | 경로 | 설명 |
@@ -151,6 +173,9 @@ src/neurovector_vision/
 ├── models.py     # Pydantic 모델
 └── __main__.py   # uvicorn 진입점
 tests/
+tools/
+├── camera_ui.py   # 로컬 카메라 테스트 UI 서버
+└── camera_ui.html # 테스트 UI 페이지
 ```
 
 ## 개발
