@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NeuroVector Vision · Camera Test</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080c14;
+      --panel: rgba(15, 23, 42, .82);
+      --line: rgba(148, 163, 184, .18);
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --green: #34d399;
+      --amber: #fbbf24;
+      --red: #fb7185;
+      --cyan: #22d3ee;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(900px 500px at 10% -10%, rgba(34, 211, 238, .14), transparent 60%),
+        radial-gradient(800px 500px at 100% 0%, rgba(52, 211, 153, .10), transparent 55%),
+        var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Noto Sans KR", sans-serif;
+    }
+    .app { max-width: 1480px; margin: 0 auto; padding: 28px 28px 22px; }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; margin-bottom: 20px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .mark {
+      width: 38px; height: 38px; border-radius: 11px;
+      background: linear-gradient(135deg, var(--cyan), var(--green));
+      display: grid; place-items: center; color: #04111a;
+      font-weight: 900; font-size: 19px;
+      box-shadow: 0 0 30px rgba(34, 211, 238, .25);
+    }
+    h1 { font-size: 19px; margin: 0; letter-spacing: -.02em; }
+    .sub { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .live {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 7px 12px; border: 1px solid rgba(52, 211, 153, .3);
+      border-radius: 999px; color: var(--green); font-size: 12px;
+      font-weight: 700; background: rgba(52, 211, 153, .08);
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+      animation: pulse 1.6s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: .35; transform: scale(.82); }
+    }
+    .layout {
+      display: grid; grid-template-columns: minmax(0, 1fr) 350px;
+      gap: 18px; align-items: start;
+    }
+    .panel {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 18px; box-shadow: 0 24px 80px rgba(0, 0, 0, .35);
+      backdrop-filter: blur(14px);
+    }
+    .video-panel { overflow: hidden; }
+    .video-head {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 13px 16px; border-bottom: 1px solid var(--line);
+      font-size: 12px; color: var(--muted);
+    }
+    .video-head strong { color: var(--text); font-size: 13px; }
+    .video-wrap {
+      position: relative; background: #020617; aspect-ratio: 16 / 9;
+    }
+    #feed { width: 100%; height: 100%; display: block; object-fit: contain; }
+    .scan {
+      position: absolute; inset: 0; pointer-events: none;
+      background: linear-gradient(
+        180deg,
+        transparent 0%,
+        rgba(34, 211, 238, .05) 50%,
+        transparent 100%
+      );
+      background-size: 100% 8px; opacity: .45;
+    }
+    .corner {
+      position: absolute; width: 26px; height: 26px;
+      border-color: rgba(34, 211, 238, .55); border-style: solid;
+      pointer-events: none;
+    }
+    .tl { top: 14px; left: 14px; border-width: 2px 0 0 2px; }
+    .tr { top: 14px; right: 14px; border-width: 2px 2px 0 0; }
+    .bl { bottom: 14px; left: 14px; border-width: 0 0 2px 2px; }
+    .br { bottom: 14px; right: 14px; border-width: 0 2px 2px 0; }
+    .video-foot {
+      display: flex; justify-content: space-between; gap: 12px;
+      padding: 11px 16px; color: var(--muted); font-size: 11px;
+      border-top: 1px solid var(--line);
+    }
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .metric { padding: 14px; }
+    .metric-label { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+    .metric-value { font-size: 22px; font-weight: 800; letter-spacing: -.03em; }
+    .metric-value small {
+      font-size: 11px; color: var(--muted); font-weight: 600; margin-left: 3px;
+    }
+    .side { display: grid; gap: 14px; }
+    .side-panel { padding: 15px; }
+    .side-title {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 11px; font-size: 12px; color: var(--muted);
+    }
+    .side-title strong { color: var(--text); font-size: 13px; }
+    #detections { display: grid; gap: 8px; min-height: 54px; }
+    .det {
+      display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
+      padding: 10px 11px; border-radius: 11px;
+      background: rgba(148, 163, 184, .06);
+      border: 1px solid rgba(148, 163, 184, .1);
+    }
+    .det-name { font-size: 13px; font-weight: 700; }
+    .det-conf { color: var(--muted); font-size: 11px; }
+    .det-distance {
+      grid-row: span 2; align-self: center; font-weight: 800; font-size: 14px;
+    }
+    .d-green { color: var(--green); }
+    .d-amber { color: var(--amber); }
+    .d-red { color: var(--red); }
+    .empty { color: var(--muted); font-size: 12px; padding: 10px 2px; }
+    .status-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 0; font-size: 12px;
+      border-bottom: 1px solid rgba(148, 163, 184, .08);
+    }
+    .status-row:last-child { border-bottom: 0; }
+    .status-row span:first-child { color: var(--muted); }
+    .ok { color: var(--green); }
+    .warn { color: var(--amber); }
+    .bad { color: var(--red); }
+    .error-box {
+      display: none; margin-top: 10px; padding: 9px 10px;
+      border: 1px solid rgba(251, 113, 133, .3);
+      border-radius: 9px; background: rgba(251, 113, 133, .08);
+      color: var(--red); font-size: 11px; line-height: 1.45;
+      word-break: break-word;
+    }
+    .actions { display: flex; gap: 8px; }
+    .btn {
+      appearance: none; border: 1px solid var(--line);
+      background: rgba(148, 163, 184, .08); color: var(--text);
+      border-radius: 9px; padding: 7px 11px; font-size: 11px;
+      cursor: pointer; text-decoration: none; font-weight: 600;
+    }
+    .btn:hover { border-color: rgba(34, 211, 238, .45); color: var(--cyan); }
+    footer {
+      margin-top: 16px; color: #64748b; font-size: 11px;
+      display: flex; justify-content: space-between; gap: 10px;
+    }
+    code { color: #a5f3fc; }
+    @media (max-width: 1000px) {
+      .layout { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: repeat(4, 1fr); }
+    }
+    @media (max-width: 680px) {
+      .app { padding: 16px; }
+      .metrics { grid-template-columns: 1fr 1fr; }
+      header { align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div class="brand">
+        <div class="mark">N</div>
+        <div>
+          <h1>NeuroVector Vision</h1>
+          <p class="sub">로컬 카메라 · YOLO 실시간 감지 테스트</p>
+        </div>
+      </div>
+      <div class="live"><span class="dot"></span> LIVE · LOCAL CAMERA</div>
+    </header>
+
+    <div class="layout">
+      <section class="panel video-panel">
+        <div class="video-head">
+          <strong>Camera Preview</strong>
+          <span id="camera-info">camera starting…</span>
+        </div>
+        <div class="video-wrap">
+          <img id="feed" src="/stream.mjpg" alt="live camera stream" />
+          <div class="scan"></div>
+          <i class="corner tl"></i><i class="corner tr"></i>
+          <i class="corner bl"></i><i class="corner br"></i>
+        </div>
+        <div class="video-foot">
+          <span>YOLOv8n · CPU · 단안 거리 추정</span>
+          <span id="updated">waiting for first frame</span>
+        </div>
+      </section>
+
+      <aside class="side">
+        <div class="panel metrics">
+          <div class="metric">
+            <div class="metric-label">추론 시간</div>
+            <div class="metric-value"><span id="inference">—</span><small>ms</small></div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">처리 FPS</div>
+            <div class="metric-value"><span id="fps">—</span></div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">감지 객체</div>
+            <div class="metric-value"><span id="count">0</span><small>개</small></div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">최근접 거리</div>
+            <div class="metric-value"><span id="nearest">—</span><small>m</small></div>
+          </div>
+        </div>
+
+        <div class="panel side-panel">
+          <div class="side-title">
+            <strong>Detections</strong><span id="det-count">0 found</span>
+          </div>
+          <div id="detections"><div class="empty">아직 감지된 객체가 없습니다.</div></div>
+        </div>
+
+        <div class="panel side-panel">
+          <div class="side-title">
+            <strong>Pipeline</strong><span id="state" class="warn">starting</span>
+          </div>
+          <div class="status-row">
+            <span>Camera</span><span id="camera-status" class="warn">starting</span>
+          </div>
+          <div class="status-row"><span>Model</span><span class="ok">YOLO</span></div>
+          <div class="status-row"><span>Frames</span><span id="frames">0</span></div>
+          <div class="status-row"><span>Stream</span><span class="ok">MJPEG</span></div>
+          <div id="error" class="error-box"></div>
+          <div class="actions" style="margin-top:12px">
+            <a class="btn" href="/snapshot.jpg" download="neurovector-camera.jpg">
+              스냅샷 저장
+            </a>
+            <button class="btn" onclick="location.reload()">새로고침</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <footer>
+      <span>테스트 전용 페이지 · 영상과 감지 결과는 이 브라우저로만 전송됩니다.</span>
+      <span><code>distance = real_size × focal / bbox_px</code></span>
+    </footer>
+  </main>
+
+  <script>
+    const fmt = (v, d = 1) => v == null ? '—' : Number(v).toFixed(d)
+    const colorClass = (d) => d == null ? '' : d < 2 ? 'd-red' : d < 5 ? 'd-amber' : 'd-green'
+
+    async function refresh() {
+      try {
+        const response = await fetch('/api/status', { cache: 'no-store' })
+        const data = await response.json()
+        document.getElementById('inference').textContent = fmt(data.inference_ms, 0)
+        document.getElementById('fps').textContent = fmt(data.fps, 1)
+        document.getElementById('count').textContent = data.detections.length
+        document.getElementById('nearest').textContent = fmt(data.nearest_distance_m, 2)
+        document.getElementById('det-count').textContent = `${data.detections.length} found`
+        document.getElementById('frames').textContent = data.frames.toLocaleString()
+        document.getElementById('camera-info').textContent =
+          `${data.camera.width}×${data.camera.height} · MJPEG`
+        document.getElementById('camera-status').textContent =
+          data.camera.ok ? 'online' : (data.camera.error || 'offline')
+        document.getElementById('camera-status').className =
+          data.camera.ok ? 'ok' : 'bad'
+        document.getElementById('state').textContent =
+          data.ok ? 'running' : (data.error ? 'error' : 'starting')
+        document.getElementById('state').className = data.ok ? 'ok' : (data.error ? 'bad' : 'warn')
+        document.getElementById('updated').textContent = data.updated_at
+          ? `updated ${new Date(data.updated_at).toLocaleTimeString()}`
+          : 'waiting for first frame'
+
+        const errorBox = document.getElementById('error')
+        errorBox.textContent = data.error || ''
+        errorBox.style.display = data.error ? 'block' : 'none'
+
+        const list = document.getElementById('detections')
+        if (!data.detections.length) {
+          list.innerHTML = '<div class="empty">아직 감지된 객체가 없습니다.</div>'
+        } else {
+          list.innerHTML = data.detections.map(d => `
+            <div class="det">
+              <div class="det-name">${d.label}</div>
+              <div class="det-distance ${colorClass(d.distance_m)}">
+                ${d.distance_m == null ? '—' : fmt(d.distance_m, 2) + ' m'}
+              </div>
+              <div class="det-conf">confidence ${fmt(d.confidence * 100, 1)}%</div>
+            </div>
+          `).join('')
+        }
+      } catch (error) {
+        document.getElementById('state').textContent = 'disconnected'
+        document.getElementById('state').className = 'bad'
+      }
+    }
+    refresh()
+    setInterval(refresh, 500)
+  </script>
+</body>
+</html>
