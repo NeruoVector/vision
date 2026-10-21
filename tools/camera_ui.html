@@ -124,6 +124,10 @@
     }
     .det-name { font-size: 13px; font-weight: 700; }
     .det-conf { color: var(--muted); font-size: 11px; }
+    .det-note {
+      grid-column: 1 / -1; color: var(--amber); font-size: 10px;
+      line-height: 1.35;
+    }
     .det-distance {
       grid-row: span 2; align-self: center; font-weight: 800; font-size: 14px;
     }
@@ -147,6 +151,38 @@
       border-radius: 9px; background: rgba(251, 113, 133, .08);
       color: var(--red); font-size: 11px; line-height: 1.45;
       word-break: break-word;
+    }
+    .hint {
+      margin: 0 0 10px; color: var(--muted); font-size: 10.5px;
+      line-height: 1.45;
+    }
+    .field-label {
+      display: block; margin: 9px 0 5px; color: var(--muted); font-size: 10.5px;
+    }
+    .field {
+      width: 100%; border: 1px solid var(--line); border-radius: 8px;
+      background: rgba(2, 6, 23, .55); color: var(--text);
+      padding: 8px 9px; font-size: 12px; outline: none;
+    }
+    .field:focus { border-color: rgba(34, 211, 238, .55); }
+    .field:disabled { opacity: .45; }
+    .btn.primary {
+      border-color: rgba(34, 211, 238, .45);
+      background: rgba(34, 211, 238, .14); color: var(--cyan);
+    }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .cal-result {
+      align-self: center; color: var(--muted); font-size: 10.5px;
+      line-height: 1.35; word-break: break-word;
+    }
+    .cal-result.good { color: var(--green); }
+    .cal-result.bad { color: var(--red); }
+    .env {
+      display: none; margin-top: 9px; padding: 8px 9px;
+      border: 1px solid rgba(148, 163, 184, .14); border-radius: 8px;
+      background: rgba(2, 6, 23, .5); color: #a5f3fc;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; line-height: 1.45; word-break: break-all;
     }
     .actions { display: flex; gap: 8px; }
     .btn {
@@ -238,6 +274,8 @@
             <span>Camera</span><span id="camera-status" class="warn">starting</span>
           </div>
           <div class="status-row"><span>Model</span><span class="ok">YOLO</span></div>
+          <div class="status-row"><span>Focal</span><span id="focal">—</span></div>
+          <div class="status-row"><span>FOV</span><span id="fov">—</span></div>
           <div class="status-row"><span>Frames</span><span id="frames">0</span></div>
           <div class="status-row"><span>Stream</span><span class="ok">MJPEG</span></div>
           <div id="error" class="error-box"></div>
@@ -247,6 +285,35 @@
             </a>
             <button class="btn" onclick="location.reload()">새로고침</button>
           </div>
+        </div>
+
+        <div class="panel side-panel">
+          <div class="side-title">
+            <strong>Distance Calibration</strong><span id="cal-state">—</span>
+          </div>
+          <p class="hint">
+            전체 객체가 보일 때 실제 거리를 입력하면 초점 거리를 보정합니다.
+            보정값은 이 실행에만 적용되며, 유지하려면 아래 환경변수를
+            <code>.env</code>에 넣고 재시작하세요.
+          </p>
+          <label class="field-label" for="cal-label">대상</label>
+          <select id="cal-label" class="field">
+            <option value="">신뢰 가능한 감지 없음</option>
+          </select>
+          <label class="field-label" for="cal-distance">실제 거리 (m)</label>
+          <input
+            id="cal-distance"
+            class="field"
+            type="number"
+            min="0.1"
+            step="0.1"
+            placeholder="예: 2.0"
+          />
+          <div class="actions" style="margin-top:10px">
+            <button class="btn primary" id="calibrate-button" disabled>보정 적용</button>
+            <span id="cal-result" class="cal-result"></span>
+          </div>
+          <div id="cal-env" class="env"></div>
         </div>
       </aside>
     </div>
@@ -260,6 +327,34 @@
   <script>
     const fmt = (v, d = 1) => v == null ? '—' : Number(v).toFixed(d)
     const colorClass = (d) => d == null ? '' : d < 2 ? 'd-red' : d < 5 ? 'd-amber' : 'd-green'
+    const distanceNotes = {
+      bbox_truncated: '화면 경계에 잘린 객체 · 거리 계산 안 함',
+      inconsistent_axes: '너비/높이 형상 불일치 · 거리 계산 안 함',
+      unknown_class: '클래스 크기 정보 없음',
+      degenerate_bbox: '유효하지 않은 바운딩 박스',
+      invalid_focal: '초점 거리 설정 오류',
+      invalid_distance: '유효하지 않은 거리',
+    }
+
+    function updateCalibrationTargets(detections) {
+      const select = document.getElementById('cal-label')
+      const reliable = detections.filter(d => d.distance_m != null)
+      const signature = reliable.map(d => d.label).join('|')
+      if (select.dataset.signature !== signature) {
+        const previous = select.value
+        select.innerHTML = reliable.length
+          ? reliable.map(d => `<option value="${d.label}">${d.label}</option>`).join('')
+          : '<option value="">신뢰 가능한 감지 없음</option>'
+        if (previous && [...select.options].some(option => option.value === previous)) {
+          select.value = previous
+        }
+        select.dataset.signature = signature
+      }
+      const disabled = reliable.length === 0
+      select.disabled = disabled
+      document.getElementById('cal-distance').disabled = disabled
+      document.getElementById('calibrate-button').disabled = disabled
+    }
 
     async function refresh() {
       try {
@@ -271,6 +366,12 @@
         document.getElementById('nearest').textContent = fmt(data.nearest_distance_m, 2)
         document.getElementById('det-count').textContent = `${data.detections.length} found`
         document.getElementById('frames').textContent = data.frames.toLocaleString()
+        document.getElementById('focal').textContent = fmt(data.focal_px, 0)
+        document.getElementById('fov').textContent = data.fov_deg == null
+          ? '—'
+          : `${fmt(data.fov_deg, 1)}°`
+        document.getElementById('cal-state').textContent =
+          data.focal_px == null ? '—' : `${fmt(data.focal_px, 0)} px`
         document.getElementById('camera-info').textContent =
           `${data.camera.width}×${data.camera.height} · MJPEG`
         document.getElementById('camera-status').textContent =
@@ -288,25 +389,88 @@
         errorBox.textContent = data.error || ''
         errorBox.style.display = data.error ? 'block' : 'none'
 
+        updateCalibrationTargets(data.detections)
+
         const list = document.getElementById('detections')
         if (!data.detections.length) {
           list.innerHTML = '<div class="empty">아직 감지된 객체가 없습니다.</div>'
         } else {
-          list.innerHTML = data.detections.map(d => `
-            <div class="det">
-              <div class="det-name">${d.label}</div>
-              <div class="det-distance ${colorClass(d.distance_m)}">
-                ${d.distance_m == null ? '—' : fmt(d.distance_m, 2) + ' m'}
+          list.innerHTML = data.detections.map(d => {
+            const note = d.distance_note
+              ? `<div class="det-note">${distanceNotes[d.distance_note] || d.distance_note}</div>`
+              : ''
+            return `
+              <div class="det">
+                <div class="det-name">${d.label}</div>
+                <div class="det-distance ${colorClass(d.distance_m)}">
+                  ${d.distance_m == null ? '—' : fmt(d.distance_m, 2) + ' m'}
+                </div>
+                <div class="det-conf">confidence ${fmt(d.confidence * 100, 1)}%</div>
+                ${note}
               </div>
-              <div class="det-conf">confidence ${fmt(d.confidence * 100, 1)}%</div>
-            </div>
-          `).join('')
+            `
+          }).join('')
         }
       } catch (error) {
         document.getElementById('state').textContent = 'disconnected'
         document.getElementById('state').className = 'bad'
       }
     }
+
+    async function calibrate() {
+      const actual = Number(document.getElementById('cal-distance').value)
+      const label = document.getElementById('cal-label').value
+      const result = document.getElementById('cal-result')
+      const button = document.getElementById('calibrate-button')
+      if (!Number.isFinite(actual) || actual <= 0) {
+        result.textContent = '0보다 큰 실제 거리를 입력하세요.'
+        result.className = 'cal-result bad'
+        return
+      }
+      if (!label) {
+        result.textContent = '신뢰 가능한 감지가 없습니다.'
+        result.className = 'cal-result bad'
+        return
+      }
+
+      button.disabled = true
+      result.textContent = '보정 중…'
+      result.className = 'cal-result'
+      try {
+        const response = await fetch('/api/calibrate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            actual_distance_m: actual,
+            label,
+            dimension: 'height',
+          }),
+        })
+        const data = await response.json()
+        if (!response.ok) {
+          result.textContent = data.detail || '보정에 실패했습니다.'
+          result.className = 'cal-result bad'
+          return
+        }
+        result.textContent =
+          `적용됨: ${data.label} · focal ${fmt(data.focal_px, 0)} px · FOV ${fmt(data.fov_deg, 1)}°`
+        result.className = 'cal-result good'
+        const env = document.getElementById('cal-env')
+        env.textContent = `${data.recommended_env}  # .env에 추가 후 재시작`
+        env.style.display = 'block'
+        refresh()
+      } catch (error) {
+        result.textContent = '서버와 통신할 수 없습니다.'
+        result.className = 'cal-result bad'
+      } finally {
+        button.disabled = false
+      }
+    }
+
+    document.getElementById('calibrate-button').addEventListener('click', calibrate)
+    document.getElementById('cal-distance').addEventListener('keydown', event => {
+      if (event.key === 'Enter') calibrate()
+    })
     refresh()
     setInterval(refresh, 500)
   </script>

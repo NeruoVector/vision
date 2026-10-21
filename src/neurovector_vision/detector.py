@@ -48,7 +48,17 @@ class ObstacleDetector:
             horizontal_fov_deg=settings.camera_horizontal_fov_deg,
             focal_length_px=settings.camera_focal_length_px,
             object_sizes=settings.resolved_object_sizes,
+            min_axis_agreement=settings.distance_min_axis_agreement,
+            edge_margin_ratio=settings.distance_edge_margin_ratio,
         )
+
+    def set_focal_length_px(self, focal_length_px: float | None) -> None:
+        """런타임에 카메라 초점 거리 보정값을 적용한다."""
+        self._distance.set_focal_length_px(focal_length_px)
+
+    def focal_px(self, image_width: int) -> float:
+        """현재 설정 기준 초점 거리(픽셀)를 반환한다."""
+        return self._distance.focal_px(image_width)
 
     def _load_model(self):
         if self._model is not None:
@@ -79,22 +89,26 @@ class ObstacleDetector:
         detections: list[Detection] = []
         for result in results:
             names = result.names
-            # 원본 이미지 너비를 사용해야 리사이즈 후에도 초점 거리가 맞는다.
+            # 원본 이미지 크기를 사용해야 리사이즈 후에도 초점 거리가 맞는다.
             image_width = int(result.orig_shape[1])
+            image_height = int(result.orig_shape[0])
             for box in result.boxes:
                 x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
                 label = str(names[int(box.cls[0])])
                 bounding_box = BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
+                estimate = self._distance.estimate_detail(
+                    label,
+                    bounding_box,
+                    image_width,
+                    image_height,
+                )
                 detections.append(
                     Detection(
                         label=label,
                         confidence=float(box.conf[0]),
                         box=bounding_box,
-                        distance_m=self._distance.estimate(
-                            label,
-                            bounding_box,
-                            image_width,
-                        ),
+                        distance_m=estimate.distance_m,
+                        distance_note=estimate.note,
                     )
                 )
 

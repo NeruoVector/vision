@@ -3,13 +3,15 @@
 핀홀 카메라 근사식 ``distance_m = real_dimension_m * focal_px / bbox_dimension_px``
 를 사용한다. 초점 거리는 수평 화각(FOV) 또는 명시적 픽셀 값을 사용한다.
 
-거리는 너비/높이 추정값 중 **더 가까운 값**을 사용한다. 장애물 회피에서는
-거리를 과대평가하는 것보다 과소평가하는 편이 안전하기 때문이다.
+단안 거리 추정은 객체의 **전체 형상**이 보일 때만 의미가 있다. 화면 경계에
+잘린 객체나 너비/높이 추정값이 크게 어긋나는 객체는 잘못된 거리를 표시하지
+않도록 ``None`` 과 사유를 반환한다.
 """
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
@@ -48,6 +50,19 @@ DEFAULT_OBJECT_SIZES: dict[str, ObjectSize] = {
     "fence": ObjectSize(width_m=2.0, height_m=1.8),
 }
 
+# 너비/높이로 계산한 두 거리가 이 비율보다 크게 어긋나면 신뢰하지 않는다.
+DEFAULT_MIN_AXIS_AGREEMENT = 0.6
+# 화면 경계에서 이 비율 안쪽에 닿은 변은 잘린 것으로 본다.
+DEFAULT_EDGE_MARGIN_RATIO = 0.02
+
+
+@dataclass(frozen=True)
+class DistanceEstimate:
+    """거리 추정 결과와 신뢰할 수 없는 경우의 사유."""
+
+    distance_m: float | None
+    note: str | None = None
+
 
 def focal_length_px(image_width: int, horizontal_fov_deg: float) -> float:
     """수평 화각과 이미지 너비로 초점 거리(픽셀)를 계산한다."""
@@ -60,6 +75,34 @@ def focal_length_px(image_width: int, horizontal_fov_deg: float) -> float:
     return image_width / (2.0 * math.tan(half_fov_rad))
 
 
+def horizontal_fov_deg(image_width: int, focal_px: float) -> float:
+    """초점 거리(픽셀)에서 수평 화각을 역산한다."""
+    if image_width <= 0:
+        raise ValueError("image_width must be positive")
+    if focal_px <= 0.0:
+        raise ValueError("focal_px must be positive")
+    return math.degrees(2.0 * math.atan(image_width / (2.0 * focal_px)))
+
+
+def focal_length_from_reference(
+    actual_distance_m: float,
+    bbox_dimension_px: float,
+    real_dimension_m: float,
+) -> float:
+    """알려진 거리의 기준 객체로 실제 초점 거리를 보정한다.
+
+    ``bbox_dimension_px`` 는 기준 객체의 바운딩 박스 너비 또는 높이,
+    ``real_dimension_m`` 은 해당 방향의 실제 크기다.
+    """
+    if actual_distance_m <= 0.0:
+        raise ValueError("actual_distance_m must be positive")
+    if bbox_dimension_px <= 0.0:
+        raise ValueError("bbox_dimension_px must be positive")
+    if real_dimension_m <= 0.0:
+        raise ValueError("real_dimension_m must be positive")
+    return actual_distance_m * bbox_dimension_px / real_dimension_m
+
+
 class DistanceEstimator:
     """클래스별 실제 크기와 YOLO 바운딩 박스로 거리를 추정한다."""
 
@@ -69,6 +112,8 @@ class DistanceEstimator:
         horizontal_fov_deg: float = 70.0,
         focal_length_px: float | None = None,
         object_sizes: dict[str, ObjectSize] | None = None,
+        min_axis_agreement: float = DEFAULT_MIN_AXIS_AGREEMENT,
+        edge_margin_ratio: float = DEFAULT_EDGE_MARGIN_RATIO,
     ) -> None:
         self._horizontal_fov_deg = horizontal_fov_deg
         self._focal_length_override = focal_length_px
@@ -76,6 +121,21 @@ class DistanceEstimator:
             label.strip().lower(): size
             for label, size in (object_sizes or DEFAULT_OBJECT_SIZES).items()
         }
+        self._min_axis_agreement = min_axis_agreement
+        self._edge_margin_ratio = edge_margin_ratio
+
+    @property
+    def focal_length_override(self) -> float | None:
+        return self._focal_length_override
+
+    def set_focal_length_px(self, focal_length_px: float | None) -> None:
+        """런타임에 보정된 초점 거리를 적용한다."""
+        if focal_length_px is not None and focal_length_px <= 0.0:
+            raise ValueError("focal_length_px must be positive")
+        self._focal_length_override = focal_length_px
+
+    def focal_px(self, image_width: int) -> float:
+        return self._focal_px(image_width)
 
     def _focal_px(self, image_width: int) -> float:
         if self._focal_length_override is not None:
@@ -84,34 +144,69 @@ class DistanceEstimator:
             return self._focal_length_override
         return focal_length_px(image_width, self._horizontal_fov_deg)
 
+    def _edge_margin(self, image_dimension: int) -> float:
+        return max(2.0, image_dimension * self._edge_margin_ratio)
+
     def estimate(
         self,
         label: str,
         box: BoundingBox,
         image_width: int,
+        image_height: int | None = None,
     ) -> float | None:
-        """거리(m)를 반환한다. 크기 정보가 없는 클래스는 ``None``."""
+        """거리(m)를 반환한다. 신뢰할 수 없으면 ``None``."""
+        return self.estimate_detail(label, box, image_width, image_height).distance_m
+
+    def estimate_detail(
+        self,
+        label: str,
+        box: BoundingBox,
+        image_width: int,
+        image_height: int | None = None,
+    ) -> DistanceEstimate:
+        """거리와 함께 신뢰할 수 없는 경우의 사유를 반환한다."""
         size = self._object_sizes.get(label.strip().lower())
         if size is None:
-            return None
+            return DistanceEstimate(None, "unknown_class")
 
         try:
             focal = self._focal_px(image_width)
         except ValueError:
-            return None
+            return DistanceEstimate(None, "invalid_focal")
 
-        estimates: list[float] = []
         box_width = box.x2 - box.x1
         box_height = box.y2 - box.y1
-        if box_width > 0.0:
-            estimates.append(size.width_m * focal / box_width)
-        if box_height > 0.0:
-            estimates.append(size.height_m * focal / box_height)
+        if box_width <= 0.0 or box_height <= 0.0:
+            return DistanceEstimate(None, "degenerate_bbox")
 
-        if not estimates:
-            return None
+        width_reliable = True
+        height_reliable = True
+        if image_height is not None:
+            margin_x = self._edge_margin(image_width)
+            margin_y = self._edge_margin(image_height)
+            width_reliable = box.x1 > margin_x and box.x2 < image_width - margin_x
+            height_reliable = box.y1 > margin_y and box.y2 < image_height - margin_y
 
-        distance = min(estimates)
-        if not math.isfinite(distance) or distance <= 0.0:
-            return None
-        return round(distance, 2)
+        if not width_reliable and not height_reliable:
+            return DistanceEstimate(None, "bbox_truncated")
+
+        width_estimate = size.width_m * focal / box_width if width_reliable else None
+        height_estimate = size.height_m * focal / box_height if height_reliable else None
+
+        if width_estimate is None:
+            distance = height_estimate
+        elif height_estimate is None:
+            distance = width_estimate
+        else:
+            agreement = min(width_estimate, height_estimate) / max(
+                width_estimate,
+                height_estimate,
+            )
+            if agreement < self._min_axis_agreement:
+                return DistanceEstimate(None, "inconsistent_axes")
+            # 두 축이 모두 신뢰 가능할 때는 면적 기반 기하평균을 사용한다.
+            distance = math.sqrt(width_estimate * height_estimate)
+
+        if distance is None or not math.isfinite(distance) or distance <= 0.0:
+            return DistanceEstimate(None, "invalid_distance")
+        return DistanceEstimate(round(distance, 2))

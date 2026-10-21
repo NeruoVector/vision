@@ -25,11 +25,16 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
 
 from neurovector_vision.config import Settings
 from neurovector_vision.detector import ObstacleDetector
+from neurovector_vision.distance import (
+    focal_length_from_reference,
+    horizontal_fov_deg,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -49,7 +54,14 @@ class CameraConfig:
     port: int = 8090
     host: str = "127.0.0.1"
     fov: float = 70.0
+    focal_length_px: float | None = None
     mirror: bool = True
+
+
+class CalibrationRequest(BaseModel):
+    actual_distance_m: float = Field(gt=0.0)
+    label: str | None = None
+    dimension: str = "height"
 
 
 class CameraPipeline:
@@ -59,11 +71,13 @@ class CameraPipeline:
             _env_file=None,
             model_path=config.model_path,
             camera_horizontal_fov_deg=config.fov,
+            camera_focal_length_px=config.focal_length_px,
         )
         self._detector = ObstacleDetector(self._settings)
         self._condition = threading.Condition()
         self._latest_jpeg = self._placeholder("Preparing camera and model...")
         self._snapshot_jpeg = self._latest_jpeg
+        self._last_detections: list[Detection] = []
         self._status: dict = {
             "ok": False,
             "error": None,
@@ -72,6 +86,8 @@ class CameraPipeline:
             "inference_ms": None,
             "detections": [],
             "nearest_distance_m": None,
+            "focal_px": None,
+            "fov_deg": None,
             "camera": {"ok": False, "width": 0, "height": 0, "error": None},
             "updated_at": None,
         }
@@ -124,6 +140,15 @@ class CameraPipeline:
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return capture
 
+    def _intrinsics(self, image_width: int) -> tuple[float | None, float | None]:
+        if image_width <= 0:
+            return None, None
+        try:
+            focal = self._detector.focal_px(image_width)
+            return round(focal, 2), round(horizontal_fov_deg(image_width, focal), 2)
+        except ValueError:
+            return None, None
+
     def _fail(self, message: str) -> None:
         with self._condition:
             self._status["ok"] = False
@@ -136,6 +161,7 @@ class CameraPipeline:
         capture = self._open_camera()
         actual_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        focal_px, fov_deg = self._intrinsics(actual_width)
         with self._condition:
             self._status["camera"] = {
                 "ok": capture.isOpened(),
@@ -143,6 +169,8 @@ class CameraPipeline:
                 "height": actual_height,
                 "error": None if capture.isOpened() else "camera open failed",
             }
+            self._status["focal_px"] = focal_px
+            self._status["fov_deg"] = fov_deg
             self._condition.notify_all()
 
         if not capture.isOpened():
@@ -198,13 +226,17 @@ class CameraPipeline:
                         "label": detection.label,
                         "confidence": round(detection.confidence, 4),
                         "distance_m": detection.distance_m,
+                        "distance_note": detection.distance_note,
+                        "box": detection.box.model_dump(),
                     }
                     for detection in detections
                 ]
+                focal_px, fov_deg = self._intrinsics(actual_width)
 
                 with self._condition:
                     self._latest_jpeg = encoded.tobytes()
                     self._snapshot_jpeg = self._latest_jpeg
+                    self._last_detections = detections
                     self._status.update(
                         {
                             "ok": True,
@@ -216,6 +248,8 @@ class CameraPipeline:
                             "nearest_distance_m": (
                                 round(nearest, 2) if nearest is not None else None
                             ),
+                            "focal_px": focal_px,
+                            "fov_deg": fov_deg,
                             "camera": {
                                 "ok": True,
                                 "width": actual_width,
@@ -275,6 +309,77 @@ class CameraPipeline:
             )
         return frame
 
+    def calibrate(
+        self,
+        actual_distance_m: float,
+        label: str | None = None,
+        dimension: str = "height",
+    ) -> dict:
+        """현재 감지된 기준 객체로 초점 거리를 보정한다."""
+        if dimension not in {"width", "height"}:
+            raise ValueError("dimension must be 'width' or 'height'")
+        if actual_distance_m <= 0.0:
+            raise ValueError("actual_distance_m must be positive")
+
+        with self._condition:
+            detections = copy.deepcopy(self._last_detections)
+            image_width = int(self._status["camera"]["width"])
+            image_height = int(self._status["camera"]["height"])
+
+        if image_width <= 0 or image_height <= 0:
+            raise ValueError("카메라 해상도를 알 수 없습니다.")
+
+        candidates = [detection for detection in detections if detection.distance_m is not None]
+        if label:
+            wanted = label.strip().lower()
+            candidates = [
+                detection for detection in candidates if detection.label.strip().lower() == wanted
+            ]
+        if not candidates:
+            raise ValueError("보정할 수 있는 신뢰 가능한 감지가 없습니다.")
+
+        # 픽셀 오차를 줄이기 위해 가장 큰(가까운) 바운딩 박스를 사용한다.
+        detection = max(
+            candidates,
+            key=lambda item: (item.box.x2 - item.box.x1) * (item.box.y2 - item.box.y1),
+        )
+        size = self._settings.resolved_object_sizes.get(detection.label.strip().lower())
+        if size is None:
+            raise ValueError(f"'{detection.label}' 클래스의 실제 크기 정보가 없습니다.")
+
+        margin_x = max(2.0, image_width * self._settings.distance_edge_margin_ratio)
+        margin_y = max(2.0, image_height * self._settings.distance_edge_margin_ratio)
+        if dimension == "width":
+            if detection.box.x1 <= margin_x or detection.box.x2 >= image_width - margin_x:
+                raise ValueError("객체 너비가 화면 경계에서 잘려 보정할 수 없습니다.")
+            bbox_dimension = detection.box.x2 - detection.box.x1
+            real_dimension = size.width_m
+        else:
+            if detection.box.y1 <= margin_y or detection.box.y2 >= image_height - margin_y:
+                raise ValueError("객체 높이가 화면 경계에서 잘려 보정할 수 없습니다.")
+            bbox_dimension = detection.box.y2 - detection.box.y1
+            real_dimension = size.height_m
+
+        previous_focal = self._detector.focal_px(image_width)
+        focal = focal_length_from_reference(
+            actual_distance_m,
+            bbox_dimension,
+            real_dimension,
+        )
+        self._detector.set_focal_length_px(focal)
+        with self._condition:
+            self._condition.notify_all()
+
+        return {
+            "label": detection.label,
+            "dimension": dimension,
+            "actual_distance_m": round(actual_distance_m, 2),
+            "previous_focal_px": round(previous_focal, 2),
+            "focal_px": round(focal, 2),
+            "fov_deg": round(horizontal_fov_deg(image_width, focal), 2),
+            "recommended_env": f"NEUROVECTOR_CAMERA_FOCAL_LENGTH_PX={focal:.2f}",
+        }
+
     def latest(self) -> bytes:
         with self._condition:
             return self._latest_jpeg
@@ -324,6 +429,17 @@ def create_app(config: CameraConfig) -> FastAPI:
     def status(request: Request) -> dict:
         return request.app.state.pipeline.status()
 
+    @app.post("/api/calibrate")
+    def calibrate(request: Request, payload: CalibrationRequest) -> dict:
+        try:
+            return request.app.state.pipeline.calibrate(
+                payload.actual_distance_m,
+                payload.label,
+                payload.dimension,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/snapshot.jpg")
     def snapshot(request: Request) -> Response:
         jpeg = request.app.state.pipeline.snapshot()
@@ -365,6 +481,12 @@ def parse_args() -> CameraConfig:
         default=settings.camera_horizontal_fov_deg,
         help="horizontal FOV (degrees)",
     )
+    parser.add_argument(
+        "--focal",
+        type=float,
+        default=settings.camera_focal_length_px,
+        help="calibrated focal length in pixels (overrides --fov)",
+    )
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--no-mirror", action="store_true", help="disable selfie mirror")
@@ -377,6 +499,7 @@ def parse_args() -> CameraConfig:
         port=args.port,
         host=args.host,
         fov=args.fov,
+        focal_length_px=args.focal,
         mirror=not args.no_mirror,
     )
 

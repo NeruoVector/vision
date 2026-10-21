@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # camera_focal_length_px 가 있으면 FOV 대신 이 값을 사용한다.
     camera_horizontal_fov_deg: float = 70.0
     camera_focal_length_px: float | None = None
+    # 너비/높이 거리 추정값이 이 비율보다 어긋나면 거리를 버린다.
+    distance_min_axis_agreement: float = Field(default=0.6, gt=0.0, le=1.0)
+    # 화면 경계에서 이 비율 안쪽에 닿은 변은 잘린 것으로 본다.
+    distance_edge_margin_ratio: float = Field(default=0.02, ge=0.0, lt=0.1)
     # JSON: {"my-obstacle": {"width_m": 1.2, "height_m": 0.8}}
     object_sizes: dict[str, ObjectSize] = Field(default_factory=dict)
 
