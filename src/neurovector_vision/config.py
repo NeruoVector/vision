@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # HTTP 서버
     host: str = "0.0.0.0"
     port: int = 8082
+    inference_queue_size: int = Field(default=2, ge=1, le=64)
+    inference_queue_timeout_s: float = Field(default=2.0, gt=0.0)
+    warmup_on_startup: bool = True
 
     # 백엔드 API (감지 결과 전송 대상)
     backend_base_url: str = "http://localhost:8081"
@@ -27,11 +30,15 @@ class Settings(BaseSettings):
     # 모델 / 추론 장치
     model_path: str = "yolo26n.pt"
     face_model_path: str = "yolo26n-pose.pt"
+    face_enabled: bool = True
     depth_model_path: str = "yolo26n-depth.pt"
     device: str = "auto"
     confidence_threshold: float = 0.35
     iou_threshold: float = 0.45
     depth_enabled: bool = True
+    depth_retry_interval_s: float = Field(default=5.0, ge=0.0)
+    depth_cpu_fallback_enabled: bool = True
+    depth_gpu_retry_interval_s: float = Field(default=30.0, ge=0.0)
     depth_imgsz: int = Field(default=768, ge=320, le=1280)
     depth_min_m: float = Field(default=0.05, gt=0.0)
     depth_max_m: float = Field(default=150.0, gt=0.0)

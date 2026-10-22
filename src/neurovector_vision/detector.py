@@ -45,6 +45,7 @@ class ObstacleDetector:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._model = None
+        self._camera_intrinsics: CameraIntrinsics | None = None
         self._distance = DistanceEstimator(
             horizontal_fov_deg=settings.camera_horizontal_fov_deg,
             focal_length_px=settings.camera_focal_length_px,
@@ -60,6 +61,9 @@ class ObstacleDetector:
     def focal_px(self, image_width: int) -> float:
         """현재 설정 기준 초점 거리(픽셀)를 반환한다."""
         return self._distance.focal_px(image_width)
+
+    def set_camera_intrinsics(self, intrinsics: CameraIntrinsics | None) -> None:
+        self._camera_intrinsics = intrinsics
 
     def _load_model(self):
         if self._model is not None:
@@ -96,7 +100,7 @@ class ObstacleDetector:
             image_height = int(result.orig_shape[0])
             # 화면 가장자리의 광축 거리(Z)를 실제 직선거리로 보정한다.
             try:
-                intrinsics = CameraIntrinsics.from_image(
+                intrinsics = self._camera_intrinsics or CameraIntrinsics.from_image(
                     image_width,
                     image_height,
                     self._distance.focal_px(image_width),
@@ -121,6 +125,7 @@ class ObstacleDetector:
                         box=bounding_box,
                         distance_m=estimate.distance_m,
                         distance_note=estimate.note,
+                        distance_source="bbox" if estimate.distance_m is not None else None,
                         priority_level=priority_level_for(
                             label,
                             self._settings.priority_levels,

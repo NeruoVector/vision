@@ -251,7 +251,8 @@ class DistanceEstimator:
                 return DistanceEstimate(None, "inconsistent_axes")
 
         width_estimate = size.width_m * focal / box_width if width_reliable else None
-        height_estimate = size.height_m * focal / box_height if height_reliable else None
+        focal_y = self._camera_intrinsics.fy if self._camera_intrinsics is not None else focal
+        height_estimate = size.height_m * focal_y / box_height if height_reliable else None
 
         if primary_reliable:
             distance = height_estimate if primary_is_height else width_estimate

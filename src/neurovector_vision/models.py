@@ -19,6 +19,11 @@ class Detection(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     box: BoundingBox
     distance_m: float | None = Field(default=None, ge=0.0)
+    distance_source: str | None = None
+    # 보정된 불확실성 모델이 없으면 신뢰도는 미확정으로 둔다.
+    distance_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    region_is_approximate: bool = False
+    track_id: int | None = None
     # 거리를 계산하지 못한 사유 (예: bbox_truncated, inconsistent_axes).
     distance_note: str | None = None
     # 1=얼굴/신체/동물, 2=차량/사물, 3=나뭇잎 등 저위험 자연물

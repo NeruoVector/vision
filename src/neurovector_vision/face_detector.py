@@ -14,13 +14,14 @@ YOLO26-depth의 미터 단위 깊이 맵을 각 부위 표면에서 샘플링해
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 
 import numpy as np
 
 from .body_parts import BodyPart, body_parts_from_keypoints
 from .config import Settings
-from .depth import DepthEstimator
+from .depth import DepthRuntime
 from .detector import VisionBackendUnavailable, _decode_image_bytes
 from .distance import CameraIntrinsics, FaceDistanceEstimator, horizontal_fov_deg
 from .models import BoundingBox, Detection
@@ -118,7 +119,7 @@ def _face_box_from_keypoints(
 class FaceDistanceDetector:
     """YOLO26-pose + YOLO26-depth 기반 얼굴/신체 부위 감지기."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, depth_runtime: DepthRuntime | None = None) -> None:
         self._settings = settings
         self._model = None
         self._distance = FaceDistanceEstimator(
@@ -130,12 +131,10 @@ class FaceDistanceDetector:
             min_keypoint_confidence=settings.face_keypoint_confidence,
             min_eye_distance_px=settings.face_min_eye_distance_px,
         )
-        self._depth = DepthEstimator(settings) if settings.depth_enabled else None
+        self._depth_runtime = depth_runtime if depth_runtime is not None else DepthRuntime(settings)
         self._depth_scale = settings.depth_scale
         self._body_parts_enabled = settings.body_parts_enabled
         self._camera_intrinsics: CameraIntrinsics | None = None
-        self.last_depth_ms: float | None = None
-        self.last_depth_error: str | None = None
 
     def _load_model(self):
         if self._model is not None:
@@ -149,16 +148,20 @@ class FaceDistanceDetector:
         self._model = YOLO(self._settings.face_model_path)
         return self._model
 
-    def warmup(self) -> None:
-        """첫 프레임 전에 모델을 로드해 UI 시작 지연을 한 번에 처리한다."""
+    def warmup(self, warm_depth: bool = True) -> None:
+        """빈 프레임으로 pose와 depth의 장치 초기화까지 완료한다."""
         self._load_model()
-        if self._depth is None:
+        frame = np.zeros((640, 640, 3), dtype=np.uint8)
+        self.detect_measurements(frame, estimate_depth=False)
+        if not warm_depth or self._depth is None:
             return
         try:
             self._depth._load_model()
         except Exception as exc:  # 깊이 모델이 없으면 키포인트 거리로 폴백
             self.last_depth_error = f"{type(exc).__name__}: {exc}"
-            self._depth = None
+            self._depth_retry_at = time.monotonic() + self._settings.depth_retry_interval_s
+            return
+        self._estimate_depth(frame)
 
     def set_ipd_scale_px_m(self, ipd_scale_px_m: float | None) -> None:
         self._distance.set_ipd_scale_px_m(ipd_scale_px_m)
@@ -188,12 +191,26 @@ class FaceDistanceDetector:
     def body_parts_enabled(self) -> bool:
         return self._body_parts_enabled
 
-    def detect(self, image: bytes | str | np.ndarray) -> list[Detection]:
-        return [measurement.detection for measurement in self.detect_measurements(image)]
+    def detect(
+        self,
+        image: bytes | str | np.ndarray,
+        *,
+        depth_map: np.ndarray | None = None,
+        estimate_depth: bool = True,
+    ) -> list[Detection]:
+        return [
+            measurement.detection
+            for measurement in self.detect_measurements(
+                image, depth_map=depth_map, estimate_depth=estimate_depth
+            )
+        ]
 
     def detect_measurements(
         self,
         image: bytes | str | np.ndarray,
+        *,
+        depth_map: np.ndarray | None = None,
+        estimate_depth: bool = True,
     ) -> list[FaceMeasurement]:
         """얼굴/신체 부위 감지 결과와 거리 계산 중간값을 함께 반환한다."""
         source = _decode_image_bytes(image) if isinstance(image, bytes) else image
@@ -216,7 +233,10 @@ class FaceDistanceDetector:
         image_height, image_width = (int(v) for v in result.orig_shape[:2])
         keypoint_data = _to_numpy(keypoints.data)
         boxes = result.boxes
-        depth_map = self._estimate_depth(source)
+        if estimate_depth and depth_map is None:
+            depth_map = self._estimate_depth(source)
+        if depth_map is not None and depth_map.shape != (image_height, image_width):
+            raise ValueError("깊이 맵 크기가 pose 입력 이미지와 일치하지 않습니다.")
 
         measurements: list[FaceMeasurement] = []
         for index, person_keypoints in enumerate(keypoint_data):
@@ -328,6 +348,8 @@ class FaceDistanceDetector:
                 )
                 if ratio > 3.0:
                     note = "depth_keypoint_mismatch"
+                    distance = None
+                    distance_source = None
         elif keypoint_distance is not None:
             distance = keypoint_distance
             distance_source = "keypoint"
@@ -351,6 +373,9 @@ class FaceDistanceDetector:
                 box=face_box,
                 distance_m=round(distance, 2) if distance is not None else None,
                 distance_note=note,
+                distance_source=distance_source,
+                distance_confidence=0.0 if note == "depth_keypoint_mismatch" else None,
+                region_is_approximate=True,
                 priority_level=priority_level_for(
                     "face",
                     self._settings.priority_levels,
@@ -399,10 +424,12 @@ class FaceDistanceDetector:
         return FaceMeasurement(
             detection=Detection(
                 label=part.label,
-                confidence=max(0.0, min(1.0, person_confidence)),
+                confidence=max(0.0, min(1.0, person_confidence, part.keypoint_confidence)),
                 box=part.box,
                 distance_m=round(distance, 2) if distance is not None else None,
                 distance_note=note,
+                distance_source=distance_source,
+                region_is_approximate=part.region_is_approximate,
                 priority_level=priority_level_for(
                     part.label,
                     self._settings.priority_levels,
@@ -415,19 +442,40 @@ class FaceDistanceDetector:
             ray_factor=ray_factor,
         )
 
+    @property
+    def _depth(self):
+        return self._depth_runtime.estimator
+
+    @_depth.setter
+    def _depth(self, estimator) -> None:
+        self._depth_runtime.estimator = estimator
+
+    @property
+    def last_depth_ms(self) -> float | None:
+        return self._depth_runtime.last_inference_ms
+
+    @last_depth_ms.setter
+    def last_depth_ms(self, value: float | None) -> None:
+        self._depth_runtime.last_inference_ms = value
+
+    @property
+    def last_depth_error(self) -> str | None:
+        return self._depth_runtime.last_error
+
+    @last_depth_error.setter
+    def last_depth_error(self, value: str | None) -> None:
+        self._depth_runtime.last_error = value
+
+    @property
+    def _depth_retry_at(self) -> float:
+        return self._depth_runtime.retry_at
+
+    @_depth_retry_at.setter
+    def _depth_retry_at(self, value: float) -> None:
+        self._depth_runtime.retry_at = value
+
     def _estimate_depth(self, source) -> np.ndarray | None:
-        if self._depth is None:
-            return None
-        try:
-            depth_map = self._depth.estimate(source)
-        except Exception as exc:  # 모델 파일/GPU 오류 시 키포인트 거리로 폴백
-            self.last_depth_error = f"{type(exc).__name__}: {exc}"
-            self.last_depth_ms = self._depth.last_inference_ms
-            self._depth = None
-            return None
-        self.last_depth_error = None
-        self.last_depth_ms = self._depth.last_inference_ms
-        return depth_map
+        return self._depth_runtime.estimate(source)
 
     def calibrate(
         self,
