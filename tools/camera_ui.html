@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NeuroVector Vision · Face & Body Part Test</title>
+  <title>NeuroVector Vision · Object & Body Distance Test</title>
   <style>
     :root {
       color-scheme: dark;
@@ -223,7 +223,7 @@
         <div class="mark">N</div>
         <div>
           <h1>NeuroVector Vision</h1>
-          <p class="sub">로컬 카메라 · YOLO26-pose + depth · 얼굴/신체 부위 거리 테스트</p>
+          <p class="sub">로컬 카메라 · YOLO26 객체·포즈·깊이 · 객체와 신체 거리 테스트</p>
         </div>
       </div>
       <div class="live"><span class="dot"></span> LIVE · LOCAL CAMERA</div>
@@ -242,7 +242,7 @@
           <i class="corner bl"></i><i class="corner br"></i>
         </div>
         <div class="video-foot">
-          <span>YOLO26-pose + depth · GPU · 얼굴/몸통/팔/손/다리/발</span>
+          <span>YOLO26 객체 + pose + depth · 객체/얼굴/몸통/팔/손/다리/발</span>
           <span id="updated">waiting for first frame</span>
         </div>
       </section>
@@ -258,18 +258,18 @@
             <div class="metric-value"><span id="fps">—</span></div>
           </div>
           <div class="metric">
-            <div class="metric-label">감지 부위</div>
+            <div class="metric-label">감지 항목</div>
             <div class="metric-value"><span id="count">0</span><small>개</small></div>
           </div>
           <div class="metric">
-            <div class="metric-label">최근접 부위 거리</div>
+            <div class="metric-label">최근접 대상 거리</div>
             <div class="metric-value"><span id="nearest">—</span><small>m</small></div>
           </div>
         </div>
 
         <div class="panel side-panel">
           <div class="side-title">
-            <strong>Face & Body Parts</strong><span id="det-count">0 found</span>
+            <strong>Objects & Body Parts</strong><span id="det-count">0 found</span>
           </div>
           <div id="detections"><div class="empty">아직 감지된 부위가 없습니다.</div></div>
         </div>
@@ -348,7 +348,10 @@
       right_foot: '오른발',
     }
     const distanceNotes = {
-      depth_keypoint_mismatch: '깊이/눈 간격 추정 불일치 · 깊이 우선',
+      depth_keypoint_mismatch: '깊이/눈 간격 추정 불일치 · 거리 미확정',
+      depth_unavailable_bbox_fallback: '깊이 사용 불가 · 객체 크기로 근사',
+      depth_invalid_region_bbox_fallback: '유효 깊이 부족 · 객체 크기로 근사',
+      depth_invalid_region: '영역 내 유효 깊이 부족',
       depth_unavailable: '이 부위의 깊이 값을 읽을 수 없음',
       eye_keypoints_missing: '눈 키포인트 없음',
       eye_keypoints_too_close: '눈 간격이 너무 작음',
@@ -388,12 +391,13 @@
           data.body_parts_enabled ? 'on' : 'face only'
         document.getElementById('parts-status').className =
           data.body_parts_enabled ? 'ok' : 'warn'
-        document.getElementById('model-name').textContent = data.model || 'YOLO26-pose'
+        document.getElementById('model-name').textContent =
+          data.models ? Object.values(data.models).filter(Boolean).join(' + ') : (data.model || 'YOLO26')
         document.getElementById('device').textContent = data.device || '—'
         document.getElementById('depth-status').textContent = data.depth_enabled
-          ? `${fmt(data.depth_ms, 0)} ms · x${fmt(data.depth_scale, 3)}`
+          ? (data.depth_error ? '오류 · 재시도 대기' : `${fmt(data.depth_ms, 0)} ms · x${fmt(data.depth_scale, 3)}`)
           : 'off'
-        document.getElementById('depth-status').className = data.depth_enabled ? 'ok' : 'warn'
+        document.getElementById('depth-status').className = data.depth_enabled && !data.depth_error ? 'ok' : 'warn'
         document.getElementById('cal-state').textContent =
           data.face_scale_px_m == null ? '—' : `${fmt(data.face_scale_px_m, 1)} px·m`
         document.getElementById('camera-info').textContent =
@@ -410,8 +414,8 @@
           : 'waiting for first frame'
 
         const errorBox = document.getElementById('error')
-        errorBox.textContent = data.error || ''
-        errorBox.style.display = data.error ? 'block' : 'none'
+        errorBox.textContent = data.error || data.depth_error || ''
+        errorBox.style.display = data.error || data.depth_error ? 'block' : 'none'
 
         updateCalibrationTargets(data.detections)
 

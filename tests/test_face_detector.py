@@ -204,3 +204,139 @@ def test_face_only_mode_skips_body_parts() -> None:
     measurements = instance.detect_measurements(np.zeros((480, 640, 3), dtype=np.uint8))
 
     assert [measurement.detection.label for measurement in measurements] == ["face"]
+
+
+def test_conflicting_depth_is_rejected_and_exposes_source_metadata() -> None:
+    instance = detector(depth=True)
+    instance._depth.median_depth = lambda *args: 4.0
+    measurement = instance.detect_measurements(np.zeros((480, 640, 3), dtype=np.uint8))[0]
+    assert measurement.detection.distance_m is None
+    assert measurement.detection.distance_note == "depth_keypoint_mismatch"
+    assert measurement.detection.distance_source is None
+    assert measurement.detection.distance_confidence == 0.0
+    assert measurement.distance_source is None
+    # Preserve intermediate values for diagnostics/calibration.
+    assert measurement.depth_distance_m == 4.0
+    assert measurement.keypoint_distance_m == pytest.approx(1.0)
+
+
+def test_depth_failure_recovers_after_cooldown(monkeypatch) -> None:
+    now = [10.0]
+    monkeypatch.setattr("neurovector_vision.face_detector.time.monotonic", lambda: now[0])
+    instance = detector(depth=True)
+
+    class RecoveringDepth(FakeDepth):
+        calls = 0
+
+        def estimate(self, source):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary depth failure")
+            return super().estimate(source)
+
+    depth = RecoveringDepth()
+    instance._depth = depth
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    assert instance.detect(image)[0].distance_source == "keypoint"
+    assert instance.last_depth_error is not None
+    assert instance.detect(image)[0].distance_source == "keypoint"
+    assert depth.calls == 1
+    assert instance.depth_enabled
+    now[0] += instance._settings.depth_retry_interval_s + 1.0
+    assert instance.detect(image)[0].distance_source == "depth"
+    assert instance.last_depth_error is None
+    assert depth.calls == 2
+
+
+def test_depth_warmup_failure_does_not_permanently_disable_depth() -> None:
+    instance = detector(depth=True)
+
+    def fail():
+        raise RuntimeError("temporary model load failure")
+
+    instance._depth._load_model = fail
+    instance.warmup()
+    assert instance.depth_enabled
+    assert instance.last_depth_error is not None
+    instance._depth_retry_at = 0.0
+    assert instance.detect(np.zeros((480, 640, 3), dtype=np.uint8))[0].distance_source == "depth"
+
+
+def test_body_confidence_uses_weakest_visible_keypoint_and_marks_approximation() -> None:
+    data = full_body_keypoints()
+    data[0, 9, 2] = 0.55
+    instance = detector(depth=True, body_parts=True, keypoint_data=data)
+    detections = instance.detect(np.zeros((480, 640, 3), dtype=np.uint8))
+    hand = next(item for item in detections if item.label == "left_hand")
+    arm = next(item for item in detections if item.label == "left_arm")
+    assert hand.confidence == pytest.approx(0.55)
+    assert arm.confidence == pytest.approx(0.55)
+    assert hand.region_is_approximate
+    assert hand.distance_source == "depth"
+    assert hand.distance_confidence is None
+
+
+def test_warmup_runs_depth_even_without_people() -> None:
+    instance = detector(depth=True)
+    instance._model = FakeModel(np.zeros((0, 17, 3)))
+    calls = []
+    instance._depth._load_model = lambda: None
+    original_estimate = instance._depth.estimate
+
+    def record(image):
+        calls.append(image.shape)
+        return original_estimate(image)
+
+    instance._depth.estimate = record
+    instance.warmup()
+    assert calls == [(640, 640, 3)]
+    assert instance.last_depth_error is None
+
+
+def test_face_detector_reuses_provided_depth_without_inference() -> None:
+    instance = detector(depth=True)
+
+    def fail(image):
+        raise AssertionError("shared depth must not run again")
+
+    instance._depth.estimate = fail
+    detections = instance.detect(
+        np.zeros((480, 640, 3)), depth_map=np.ones((480, 640)), estimate_depth=False
+    )
+    assert detections[0].distance_source == "depth"
+
+
+def test_face_detector_does_not_retry_missing_shared_depth() -> None:
+    instance = detector(depth=True)
+
+    def fail(image):
+        raise AssertionError("failed shared depth must not be retried in the same frame")
+
+    instance._depth.estimate = fail
+    detections = instance.detect(np.zeros((480, 640, 3)), estimate_depth=False)
+    assert detections[0].distance_source == "keypoint"
+
+
+def test_face_detector_uses_shared_runtime_state() -> None:
+    from neurovector_vision.depth import DepthRuntime
+
+    settings = Settings(_env_file=None, depth_enabled=False)
+    runtime = DepthRuntime(settings)
+    instance = FaceDistanceDetector(settings, depth_runtime=runtime)
+    runtime.estimator = FakeDepth()
+    runtime.last_error = "previous shared failure"
+    assert instance._depth is runtime.estimator
+    assert instance.depth_enabled
+    assert instance.last_depth_error == "previous shared failure"
+    instance._depth_retry_at = 12.0
+    assert runtime.retry_at == 12.0
+
+
+def test_face_warmup_can_skip_shared_depth() -> None:
+    instance = detector(depth=True)
+
+    def fail(image):
+        raise AssertionError("pipeline warms shared depth separately")
+
+    instance._depth.estimate = fail
+    instance.warmup(warm_depth=False)

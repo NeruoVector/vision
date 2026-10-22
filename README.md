@@ -39,14 +39,15 @@ uv pip install --python .venv/bin/python \
 ```
 
 `NEUROVECTOR_DEVICE=auto` 이면 CUDA 사용 가능 시 `0`(GPU), 아니면 `cpu`를 선택합니다.
-GPU 메모리가 부족하면 `--no-depth` 또는 `NEUROVECTOR_DEPTH_ENABLED=false` 로 깊이
+깊이 추론 중 CUDA 오류가 발생하면 CPU로 전환하고 30초 후 GPU를 다시 시도합니다.
+객체/pose 추론 실패는 API에서 503으로 보고됩니다. GPU 메모리가 부족하면 `--no-depth` 또는 `NEUROVECTOR_DEPTH_ENABLED=false` 로 깊이
 모델을 끄고 얼굴 키포인트 거리만 사용할 수 있습니다.
 
 API 문서: http://localhost:8082/docs
 
 ## 카메라 테스트 UI (얼굴/신체 부위 거리)
 
-로컬 카메라에서 **얼굴과 신체 부위**를 감지하고, YOLO26-pose 키포인트와
+로컬 카메라에서 **일반 객체·얼굴·신체 부위**를 감지하고, YOLO26 객체 검출·pose 키포인트와
 YOLO26-depth 깊이 맵을 융합해 부위별 거리를 표시하는 개발용 도구입니다.
 서버가 카메라를 직접 열어 MJPEG 로 전송하므로 브라우저 카메라 권한은 필요 없습니다.
 
@@ -59,12 +60,14 @@ uv run --extra vision python tools/camera_ui.py
 uv run --extra vision python tools/camera_ui.py --face-only
 ```
 
-- 얼굴, 몸통, 왼/오른팔, 왼/오른손, 왼/오른다리, 왼/오른발 박스와 거리.
+- 일반 객체와 얼굴, 몸통, 왼/오른팔, 왼/오른손, 왼/오른다리, 왼/오른발 박스와 거리.
 - 얼굴은 눈 간격 기반 보조 거리도 함께 표시하고, 나머지 부위는 깊이 모델 거리를 사용합니다.
-- `--model yolo26n-pose.pt` (사람 키포인트), `--depth-model yolo26n-depth.pt`.
+- `--object-model yolo26n.pt` (일반 객체), `--model yolo26n-pose.pt` (사람 키포인트),
+  `--depth-model yolo26n-depth.pt` (거리). 세 모델을 함께 사용합니다.
 - `--device auto|0|cpu`, `--no-depth`, `--face-only`, `--focal`, `--face-scale` 지원.
-- YOLO26 가중치는 첫 실행 시 자동 다운로드됩니다. (`yolo26n-pose.pt`, `yolo26n-depth.pt`)
-- GPU 추론은 약 50~70ms/프레임 (RTX 3050, pose+depth, warmup 제외).
+- YOLO26 가중치는 첫 실행 시 자동 다운로드됩니다. (`yolo26n.pt`, `yolo26n-pose.pt`, `yolo26n-depth.pt`)
+- 실제 RTX 3050에서 세 모델의 예열 후 샘플 통합 추론은 평균 약 39~45ms였습니다.
+  [측정 조건과 결과](docs/runtime-validation-yolo26.md)를 참고하세요.
 - 손/팔은 YOLO26-pose가 사람을 감지했을 때 키포인트로 계산합니다. 손만 화면을
   가득 채우는 초근접 장면은 전용 손 키포인트 모델이 필요합니다.
 
@@ -163,8 +166,8 @@ focal_px   = image_width_px / (2 * tan(horizontal_fov_deg / 2))
 - 바운딩 박스가 화면 경계에서 `NEUROVECTOR_DISTANCE_EDGE_MARGIN_RATIO` 안쪽에
   닿으면 잘린 것으로 봅니다.
 - 얼굴 근거리 거리는 전체 사람 크기 대신 눈/귀 키포인트와 YOLO26-depth를 사용합니다.
-  `distance_note=depth_keypoint_mismatch` 는 두 추정이 3배 이상 다르다는 뜻이며,
-  이때는 깊이 모델 값을 우선합니다.
+  `distance_note=depth_keypoint_mismatch` 는 두 추정이 3배 넘게 다르다는 뜻이며,
+  이때는 거리를 미확정(`distance_m=null`)으로 반환합니다.
 
 `NEUROVECTOR_OBJECT_SIZES` 예시:
 
@@ -316,3 +319,74 @@ uv run ruff format .
 | `NEUROVECTOR_OBJECT_SIZES` | `{}` (기본 크기 표 사용) |
 | `NEUROVECTOR_PRIORITY_LEVELS` | `{}` (기본 1~3단계 매핑 사용) |
 | `NEUROVECTOR_DRONE_ID` | `drone-001` |
+
+## 추론 파이프라인과 상태
+
+`/detect`는 객체 감지와 얼굴·신체 부위 추정을 함께 실행합니다.
+`NEUROVECTOR_FACE_ENABLED=false`이면 객체 감지만 실행합니다.
+캘리브레이션 파일이 있으면 입력 해상도에 맞게 내부 파라미터를 조정하고
+렌즈 왜곡을 제거한 영상에서 `yolo26n-depth.pt` 깊이 맵을 **프레임당 한 번** 계산해
+일반 객체와 얼굴·신체 감지기가 공유합니다. 사람이나 얼굴이 없는 장면도 깊이를
+계산하며, `NEUROVECTOR_FACE_ENABLED=false`여도 객체의 깊이 거리는 유지됩니다.
+일반 객체는 박스 중앙 영역의 깊이 중앙값에 보정 스케일과 사선 보정을 적용합니다.
+클래스별 크기가 없는 객체나 화면에 잘린 객체도 유효 깊이가 있으면 거리를 반환합니다.
+깊이가 없거나 유효 픽셀이 부족하면 기존 박스 크기 기반 거리로 폴백하고 사유를 표시합니다.
+얼굴은 깊이/키포인트를 비교하며 신체는 부위별 키포인트 주변 깊이를 사용합니다. person과 그 신체 부위는
+각각 반환되므로 결과 개수가 실제 사람 수와 같지는 않습니다.
+
+모델은 서버 프로세스마다 유지하며 기본적으로 시작 시 예열합니다.
+선택 의존성이 없거나 예열이 실패해도 서버는 시작하고 `/health`에
+`status=degraded`, `inference_error`를 반환합니다. 깊이 장애는 `depth_error`로,
+사용 중인 객체·pose·깊이 가중치는 `models`로 확인할 수 있습니다. 다음 감지 요청에서 다시 시도합니다.
+실제 추론은 전용 작업자 1개에서 직렬 실행합니다. 실행 중 요청을 포함해 기본
+2개까지 접수하며, 슬롯을 2초 내 확보하지 못하면 503을 반환합니다.
+웹 작업자 프로세스를 늘리면 각 프로세스가 별도의 모델과 GPU 메모리를 사용합니다.
+
+깊이 추정 실패는 기본 5초 후 재시도합니다. 얼굴의 두 거리 추정이 3배 넘게
+충돌하면 검출은 유지하고 거리는 비웁니다. 응답에 다음 필드가 추가됩니다.
+
+- `distance_source`: `bbox`, `depth`, `keypoint` 또는 `null`
+- `distance_confidence`: 미보정 상태에서는 `null`, 거리 충돌이 확인되면 `0.0`
+- `region_is_approximate`: 얼굴·신체 키포인트로 근사한 영역이면 `true`
+- `track_id`: 연속 카메라 UI에서만 사용하는 추적 ID. 개별 API 업로드는 `null`
+
+카메라 UI는 같은 라벨의 박스를 IoU로 연결하고 최근 거리 중앙값을 사용합니다.
+가까워진 거리는 즉시 반영하며 미확정 거리를 과거 값으로 대체하지 않습니다.
+보정·해상도 변경 시 이력을 초기화합니다. `--no-tracking`으로 끌 수 있습니다.
+교차·가림 상황에서는 ID가 바뀔 수 있으며 신체 부위와 사람의 소속 관계,
+속도·충돌 예상 시간은 아직 추정하지 않습니다.
+
+## 실제 영상 평가
+
+검출 정밀도·재현율, 일치한 객체의 거리 MAE·거리 반환율, 추론 p95 지연은
+라벨링한 영상으로 측정할 수 있습니다. 데이터셋은 별도로 준비해야 합니다.
+
+```bash
+uv run --extra vision python tools/evaluate.py dataset/manifest.json --warmup 2
+```
+
+manifest 예시(이미지 경로는 manifest 파일 기준):
+
+```json
+{"images": [
+  {"image": "frames/001.jpg", "annotations": [
+    {"label": "person", "box": [10, 20, 100, 180], "distance_m": 2.4}
+  ]},
+  {"image": "frames/empty.jpg", "annotations": []}
+]}
+```
+
+빈 장면도 포함하고 출력 대상인 얼굴·신체 부위도 해당 라벨로 빠짐없이 표시하세요.
+지연은 디코딩과 추론을 포함하며 파일 읽기·백엔드 전송은 제외합니다.
+
+
+## 기존 구현에서 보완한 내용
+
+기존 `3e94c3a`의 얼굴 IPD·깊이 보정, `72cbeb5`의 신체 부위·키포인트 패치 깊이와
+직선거리 보정, `0a4e0c1`의 손·발 영역 확장을 확인하고 그 동작을 유지했습니다.
+깊이 모델의 실행·오류 복구 상태를 공유해 중복 추론을 없애고 일반 객체에도 깊이를
+적용했습니다. 이미지 밖 박스·키포인트의 잘못된 깊이 샘플링을 차단하고,
+입력 영상과 깊이 맵 크기 일치를 확인합니다. 카메라 미러 영상은 주점도 반전합니다.
+
+단안 모델이 출력하는 미터 값은 추정치입니다. 실제 카메라의 거리 보정과
+실측 거리 라벨 평가가 필요하며, 현재 검증은 추론 실행과 데이터 흐름을 확인한 것입니다.

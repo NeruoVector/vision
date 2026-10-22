@@ -1,0 +1,169 @@
+{
+  "gpu": "NVIDIA GeForce RTX 3050 4GB Laptop GPU",
+  "torch": "2.9.1+cu128",
+  "ultralytics": "8.4.182",
+  "object_model": "yolov8n.pt",
+  "note": "Available local object weights; default yolo26n.pt not present.",
+  "warmup_ms": 1860.0365610000154,
+  "samples": {
+    "bus.jpg": {
+      "runs": 10,
+      "mean_ms": 49.36446239989891,
+      "p95_ms": 57.627837000836735,
+      "detections": 29,
+      "labels": [
+        "body",
+        "bus",
+        "face",
+        "left_arm",
+        "left_foot",
+        "left_hand",
+        "left_leg",
+        "person",
+        "right_arm",
+        "right_foot",
+        "right_hand",
+        "right_leg"
+      ],
+      "with_distance": 29,
+      "depth_error": null,
+      "depth_device": "0"
+    },
+    "zidane.jpg": {
+      "runs": 10,
+      "mean_ms": 39.499473400064744,
+      "p95_ms": 40.52812900044955,
+      "detections": 10,
+      "labels": [
+        "body",
+        "face",
+        "left_arm",
+        "left_hand",
+        "person",
+        "right_arm",
+        "right_hand"
+      ],
+      "with_distance": 10,
+      "depth_error": null,
+      "depth_device": "0"
+    }
+  },
+  "cuda_peak_allocated_mb": 169.54248046875,
+  "fallback": {
+    "injected_cuda_failure": true,
+    "device_after_failure": "cpu",
+    "shape": [
+      1080,
+      810
+    ],
+    "finite_ratio": 1.0,
+    "device_after_retry": "0"
+  },
+  "cameras": [
+    {
+      "index": 0,
+      "opened": true,
+      "frame_read": true,
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "inference_ms": 133.44636399961018,
+      "detections": 3,
+      "depth_error": null
+    },
+    {
+      "index": 2,
+      "opened": true,
+      "frame_read": true,
+      "shape": [
+        360,
+        640,
+        3
+      ],
+      "inference_ms": 42.76221000145597,
+      "detections": 2,
+      "depth_error": null
+    }
+  ],
+  "api": {
+    "requests": [
+      {
+        "status": 200,
+        "elapsed_ms": 132.71,
+        "detections": 29,
+        "forwarded": 29
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 46.99,
+        "detections": 29,
+        "forwarded": 29
+      },
+      {
+        "status": 200,
+        "elapsed_ms": 47.42,
+        "detections": 29,
+        "forwarded": 29
+      }
+    ],
+    "invalid_image_status": 400,
+    "health": {
+      "status": "ok",
+      "version": "0.1.0",
+      "inference_error": null
+    },
+    "forwarding": "recording stub; no external backend writes"
+  },
+  "camera_streams": [
+    {
+      "ok": true,
+      "frames": 31,
+      "fps": 14.91,
+      "inference_ms": 56.6,
+      "depth_ms": 29.2,
+      "depth_error": null,
+      "error": null,
+      "tracking_enabled": true,
+      "camera": {
+        "ok": true,
+        "width": 640,
+        "height": 480,
+        "error": null
+      },
+      "index": 0,
+      "jpeg_valid": true,
+      "detections": 2,
+      "tracked_detections": 2
+    },
+    {
+      "ok": true,
+      "frames": 30,
+      "fps": 7.76,
+      "inference_ms": 33.0,
+      "depth_ms": 22.0,
+      "depth_error": null,
+      "error": null,
+      "tracking_enabled": true,
+      "camera": {
+        "ok": true,
+        "width": 640,
+        "height": 360,
+        "error": null
+      },
+      "index": 2,
+      "jpeg_valid": true,
+      "detections": 2,
+      "tracked_detections": 2
+    }
+  ],
+  "validation_notes": [
+    "Sample timing and initial warmup measurements preceded the final depth warmup fix; API and camera-stream checks include the fix.",
+    "p95 on ten runs uses nearest rank and is the maximum of those ten measurements.",
+    "CUDA failure was injected at the predict boundary; CPU and GPU recovery inference used the actual depth model. No real OOM was induced.",
+    "No ground-truth labels or measured distances were available; detection accuracy and distance error were not evaluated.",
+    "Camera images were neither saved nor sent to an external service.",
+    "Peak allocated memory is the torch allocator measurement, not total GPU memory usage."
+  ]
+}

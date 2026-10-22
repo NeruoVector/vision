@@ -36,6 +36,8 @@ class BodyPart:
     box: BoundingBox
     points: tuple[tuple[float, float], ...]
     radius_px: float = 6.0
+    keypoint_confidence: float = 1.0
+    region_is_approximate: bool = True
 
 
 def _point(keypoints: np.ndarray, index: int) -> tuple[float, float, float]:
@@ -193,6 +195,11 @@ def body_parts_from_keypoints(
                     label="body",
                     box=box,
                     points=tuple(torso_points),
+                    keypoint_confidence=min(
+                        point[2]
+                        for point in (left_shoulder, right_shoulder, left_hip, right_hip)
+                        if _valid(point, min_confidence)
+                    ),
                     radius_px=max(6.0, shoulder_px * 0.08),
                 )
             )
@@ -215,6 +222,11 @@ def body_parts_from_keypoints(
                         label=f"{side}_arm",
                         box=box,
                         points=tuple(arm_points),
+                        keypoint_confidence=min(
+                            point[2]
+                            for point in (shoulder, elbow, wrist)
+                            if _valid(point, min_confidence)
+                        ),
                         radius_px=max(
                             5.0,
                             min(box.x2 - box.x1, box.y2 - box.y1) * 0.25,
@@ -241,6 +253,9 @@ def body_parts_from_keypoints(
                         label=f"{side}_hand",
                         box=box,
                         points=((wrist[0], wrist[1]), hand_center),
+                        keypoint_confidence=(
+                            min(wrist[2], elbow[2]) if _valid(elbow, min_confidence) else wrist[2]
+                        ),
                         radius_px=max(5.0, hand_width * 0.30),
                     )
                 )
@@ -261,6 +276,11 @@ def body_parts_from_keypoints(
                         label=f"{side}_leg",
                         box=box,
                         points=tuple(leg_points),
+                        keypoint_confidence=min(
+                            point[2]
+                            for point in (hip, knee, ankle)
+                            if _valid(point, min_confidence)
+                        ),
                         radius_px=max(
                             5.0,
                             min(box.x2 - box.x1, box.y2 - box.y1) * 0.25,
@@ -285,6 +305,9 @@ def body_parts_from_keypoints(
                         label=f"{side}_foot",
                         box=box,
                         points=((ankle[0], ankle[1]), foot_center),
+                        keypoint_confidence=(
+                            min(ankle[2], knee[2]) if _valid(knee, min_confidence) else ankle[2]
+                        ),
                         radius_px=max(4.0, foot_width * 0.30),
                     )
                 )

@@ -1,7 +1,7 @@
-"""로컬 카메라 + YOLO26 얼굴/신체 부위 감지 실시간 테스트 UI.
+"""로컬 카메라 + YOLO26 일반 객체/얼굴/신체 부위 감지 실시간 테스트 UI.
 
-브라우저에서 ``http://localhost:8090`` 을 열면 카메라 영상과 얼굴, 몸통,
-팔, 손, 다리, 발 박스와 부위별 거리, 추론 시간/FPS 를 볼 수 있다.
+브라우저에서 ``http://localhost:8090`` 을 열면 카메라 영상과 일반 객체,
+얼굴, 몸통, 팔, 손, 다리, 발 박스와 거리, 추론 시간/FPS 를 볼 수 있다.
 운영 API 가 아니라 로컬 카메라/모델/거리 보정을 빠르게 확인하는 개발 도구다.
 
 실행:
@@ -32,18 +32,21 @@ from pydantic import BaseModel, Field
 
 from neurovector_vision.camera_calibration import CameraCalibration
 from neurovector_vision.config import Settings
+from neurovector_vision.depth import DepthRuntime
+from neurovector_vision.detector import ObstacleDetector
 from neurovector_vision.distance import (
     CameraIntrinsics,
     focal_length_px,
     horizontal_fov_deg,
 )
-from neurovector_vision.face_detector import FaceDistanceDetector
+from neurovector_vision.face_detector import FaceDistanceDetector, FaceMeasurement
+from neurovector_vision.pipeline import apply_depth_distances
 from neurovector_vision.priority import priority_name
+from neurovector_vision.tracking import TemporalTracker
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from neurovector_vision.face_detector import FaceMeasurement
     from neurovector_vision.models import Detection
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,8 @@ HTML = Path(__file__).with_name("camera_ui.html").read_text(encoding="utf-8")
 class CameraConfig:
     camera_index: int = 0
     face_model_path: str = "yolo26n-pose.pt"
+    object_model_path: str = "yolo26n.pt"
+    objects_enabled: bool = True
     depth_model_path: str = "yolo26n-depth.pt"
     width: int = 1280
     height: int = 720
@@ -67,6 +72,7 @@ class CameraConfig:
     body_parts_enabled: bool = True
     device: str = "auto"
     mirror: bool = True
+    tracking_enabled: bool = True
 
 
 class CalibrationRequest(BaseModel):
@@ -84,6 +90,7 @@ class CameraPipeline:
         if focal_override is None and self._calibration is not None:
             focal_override = self._calibration.focal_px
         self._settings = Settings(
+            model_path=config.object_model_path,
             face_model_path=config.face_model_path,
             depth_model_path=config.depth_model_path,
             depth_enabled=config.depth_enabled,
@@ -93,13 +100,22 @@ class CameraPipeline:
             camera_focal_length_px=focal_override,
             face_ipd_scale_px_m=config.face_ipd_scale_px_m,
         )
-        self._detector = FaceDistanceDetector(self._settings)
+        self._depth_runtime = DepthRuntime(self._settings)
+        self._detector = FaceDistanceDetector(self._settings, depth_runtime=self._depth_runtime)
+        self._obstacles = ObstacleDetector(self._settings) if config.objects_enabled else None
+        self._tracker = TemporalTracker() if config.tracking_enabled else None
+        self._inference_lock = threading.Lock()
+        self._calibration_epoch = 0
+        self._tracked_epoch = 0
+        self._tracking_frame_shape: tuple[int, ...] | None = None
         self._camera_intrinsics = self._make_intrinsics(
             config.width,
             config.height,
             focal_override,
         )
         self._detector.set_camera_intrinsics(self._camera_intrinsics)
+        if self._obstacles is not None:
+            self._obstacles.set_camera_intrinsics(self._camera_intrinsics)
         self._condition = threading.Condition()
         self._latest_jpeg = self._placeholder("Preparing YOLO26 and camera...")
         self._snapshot_jpeg = self._latest_jpeg
@@ -121,7 +137,14 @@ class CameraPipeline:
             "depth_enabled": self._detector.depth_enabled,
             "body_parts_enabled": self._detector.body_parts_enabled,
             "depth_error": None,
+            "tracking_enabled": config.tracking_enabled,
             "model": Path(config.face_model_path).name,
+            "models": {
+                "objects": Path(config.object_model_path).name if config.objects_enabled else None,
+                "pose": Path(config.face_model_path).name,
+                "depth": Path(config.depth_model_path).name if config.depth_enabled else None,
+            },
+            "objects_enabled": config.objects_enabled,
             "device": self._settings.resolved_device,
             "calibration": {
                 "loaded": self._calibration is not None,
@@ -195,10 +218,10 @@ class CameraPipeline:
             cx = float(matrix[0, 2])
             if self._config.mirror:
                 # undistort 후 좌우 반전하므로 주점도 반전 좌표계로 옮긴다.
-                cx = image_width - cx
+                cx = image_width - 1 - cx
             return CameraIntrinsics(
-                fx=float(matrix[0, 0]),
-                fy=float(matrix[1, 1]),
+                fx=focal_override if focal_override is not None else float(matrix[0, 0]),
+                fy=focal_override if focal_override is not None else float(matrix[1, 1]),
                 cx=cx,
                 cy=float(matrix[1, 2]),
             )
@@ -241,6 +264,11 @@ class CameraPipeline:
             self._config.focal_length_px,
         )
         self._detector.set_camera_intrinsics(self._camera_intrinsics)
+        if self._obstacles is not None:
+            self._obstacles.set_camera_intrinsics(self._camera_intrinsics)
+            self._obstacles.set_focal_length_px(
+                self._camera_intrinsics.fx if self._camera_intrinsics is not None else None
+            )
         focal_px, fov_deg = self._intrinsics(actual_width)
         with self._condition:
             self._status["camera"] = {
@@ -262,7 +290,10 @@ class CameraPipeline:
 
         try:
             # 첫 요청에서 모델 로딩 지연이 발생하지 않도록 미리 준비한다.
-            self._detector.warmup()
+            self._detector.warmup(warm_depth=True)
+            if self._obstacles is not None:
+                self._obstacles._load_model()
+                self._obstacles.detect(np.zeros((640, 640, 3), dtype=np.uint8))
             with self._condition:
                 self._latest_jpeg = self._placeholder("Waiting for the first frame...")
                 self._status["depth_error"] = self._detector.last_depth_error
@@ -276,15 +307,31 @@ class CameraPipeline:
                     continue
 
                 started = time.perf_counter()
+                frame_height, frame_width = frame.shape[:2]
+                if (frame_width, frame_height) != (actual_width, actual_height):
+                    actual_width, actual_height = frame_width, frame_height
+                    if self._calibration is not None:
+                        self._calibration = self._calibration.scaled_for(
+                            actual_width, actual_height
+                        )
+                        if self._config.focal_length_px is None:
+                            self._detector.set_focal_length_px(self._calibration.focal_px)
+                    self._camera_intrinsics = self._make_intrinsics(
+                        actual_width, actual_height, self._config.focal_length_px
+                    )
+                    self._detector.set_camera_intrinsics(self._camera_intrinsics)
+                    if self._obstacles is not None:
+                        self._obstacles.set_camera_intrinsics(self._camera_intrinsics)
+                        self._obstacles.set_focal_length_px(
+                            self._camera_intrinsics.fx
+                            if self._camera_intrinsics is not None
+                            else None
+                        )
                 if self._calibration is not None:
                     frame = self._calibration.undistort(frame)
                 if self._config.mirror:
                     frame = cv2.flip(frame, 1)
-                ok, raw = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
-                if not ok:
-                    continue
-                measurements = self._detector.detect_measurements(raw.tobytes())
-                detections = [measurement.detection for measurement in measurements]
+                measurements, detections = self._infer_frame(frame)
                 inference_ms = (time.perf_counter() - started) * 1000.0
 
                 annotated = self._draw(frame.copy(), detections)
@@ -311,13 +358,14 @@ class CameraPipeline:
                 )
                 payload = [
                     {
-                        "label": measurement.detection.label,
-                        "confidence": round(measurement.detection.confidence, 4),
-                        "distance_m": measurement.detection.distance_m,
-                        "distance_note": measurement.detection.distance_note,
-                        "priority_level": measurement.detection.priority_level,
-                        "priority_name": priority_name(measurement.detection.priority_level),
-                        "box": measurement.detection.box.model_dump(),
+                        "label": detection.label,
+                        "track_id": detection.track_id,
+                        "confidence": round(detection.confidence, 4),
+                        "distance_m": detection.distance_m,
+                        "distance_note": detection.distance_note,
+                        "priority_level": detection.priority_level,
+                        "priority_name": priority_name(detection.priority_level),
+                        "box": detection.box.model_dump(),
                         "keypoint_distance_m": measurement.keypoint_distance_m,
                         "keypoint_z_m": measurement.keypoint_z_m,
                         "raw_depth_m": measurement.raw_depth_m,
@@ -334,7 +382,7 @@ class CameraPipeline:
                             else None
                         ),
                     }
-                    for measurement in measurements
+                    for measurement, detection in zip(measurements, detections, strict=True)
                 ]
                 focal_px, fov_deg = self._intrinsics(actual_width)
                 face_scale = (
@@ -386,6 +434,38 @@ class CameraPipeline:
         finally:
             capture.release()
 
+    def _infer_frame(self, frame: np.ndarray) -> tuple[list[FaceMeasurement], list[Detection]]:
+        # Calibration and inference must see a consistent scale. Only the camera
+        # worker touches tracker state; calibration queues an epoch change.
+        with self._inference_lock:
+            if self._tracker is not None and (
+                self._tracked_epoch != self._calibration_epoch
+                or self._tracking_frame_shape != frame.shape
+            ):
+                self._tracker.reset()
+            self._tracked_epoch = self._calibration_epoch
+            self._tracking_frame_shape = frame.shape
+            depth_map = self._depth_runtime.estimate(frame)
+            measurements = self._detector.detect_measurements(
+                frame, depth_map=depth_map, estimate_depth=False
+            )
+            if self._obstacles is not None:
+                objects = apply_depth_distances(
+                    self._obstacles.detect(frame),
+                    depth_map,
+                    self._depth_runtime,
+                    self._camera_intrinsics,
+                    self._detector.depth_scale,
+                )
+                measurements.extend(
+                    FaceMeasurement(detection=item, distance_source=item.distance_source)
+                    for item in objects
+                )
+            detections = [measurement.detection for measurement in measurements]
+            if self._tracker is not None:
+                detections = self._tracker.update(detections)
+            return measurements, detections
+
     @staticmethod
     def _draw(frame: np.ndarray, detections: list[Detection]) -> np.ndarray:
         for detection in detections:
@@ -401,6 +481,8 @@ class CameraPipeline:
             )
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             label = f"P{detection.priority_level} {detection.label} {detection.confidence:.2f}"
+            if detection.track_id is not None:
+                label += f" #{detection.track_id}"
             if distance is not None:
                 label += f"  {distance:.2f} m"
             (text_w, text_h), baseline = cv2.getTextSize(
@@ -461,7 +543,10 @@ class CameraPipeline:
                 * (item.detection.box.y2 - item.detection.box.y1)
             ),
         )
-        return self._detector.calibrate(actual_distance_m, measurement, image_width)
+        with self._inference_lock:
+            result = self._detector.calibrate(actual_distance_m, measurement, image_width)
+            self._calibration_epoch += 1
+            return result
 
     def latest(self) -> bytes:
         with self._condition:
@@ -561,6 +646,9 @@ def parse_args() -> CameraConfig:
         help="YOLO26 pose weights for face keypoints",
     )
     parser.add_argument(
+        "--object-model", default=settings.model_path, help="YOLO26 general object weights"
+    )
+    parser.add_argument(
         "--depth-model",
         default=settings.depth_model_path,
         help="YOLO26 depth weights",
@@ -595,7 +683,10 @@ def parse_args() -> CameraConfig:
     parser.add_argument(
         "--face-only",
         action="store_true",
-        help="disable body-part boxes and show face only",
+        help="disable general objects and body-part boxes and show face only",
+    )
+    parser.add_argument(
+        "--no-tracking", action="store_true", help="disable stream IDs and distance filtering"
     )
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--host", default="127.0.0.1")
@@ -604,6 +695,8 @@ def parse_args() -> CameraConfig:
     return CameraConfig(
         camera_index=args.camera,
         face_model_path=args.model,
+        object_model_path=args.object_model,
+        objects_enabled=not args.face_only,
         depth_model_path=args.depth_model,
         width=args.width,
         height=args.height,
@@ -613,10 +706,11 @@ def parse_args() -> CameraConfig:
         focal_length_px=args.focal,
         face_ipd_scale_px_m=args.face_scale,
         calibration_path=args.calibration,
-        depth_enabled=not args.no_depth,
+        depth_enabled=settings.depth_enabled and not args.no_depth,
         body_parts_enabled=settings.body_parts_enabled and not args.face_only,
         device=args.device,
         mirror=not args.no_mirror,
+        tracking_enabled=not args.no_tracking,
     )
 
 
