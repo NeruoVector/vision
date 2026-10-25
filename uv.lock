@@ -768,6 +768,8 @@ vision = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "numpy" },
+    { name = "opencv-python-headless" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -786,6 +788,8 @@ provides-extras = ["vision"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "numpy" },
+    { name = "opencv-python-headless", specifier = ">=5.0.0.93" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.17.1" },
 ]
