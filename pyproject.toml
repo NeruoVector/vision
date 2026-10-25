@@ -24,6 +24,8 @@ neurovector-vision = "neurovector_vision.__main__:main"
 
 [dependency-groups]
 dev = [
+    "numpy",
+    "opencv-python-headless>=5.0.0.93",
     "pytest>=9.1.1",
     "ruff>=0.17.1",
 ]
