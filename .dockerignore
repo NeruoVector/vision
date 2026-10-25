@@ -8,5 +8,4 @@ __pycache__/
 .gitignore
 Dockerfile
 .dockerignore
-README.md
 LICENSE
