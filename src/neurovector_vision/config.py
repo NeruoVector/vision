@@ -28,11 +28,12 @@ class Settings(BaseSettings):
     backend_timeout_seconds: float = 5.0
 
     # 모델 / 추론 장치
-    model_path: str = "yolo26n.pt"
-    face_model_path: str = "yolo26n-pose.pt"
+    model_path: str = "yolo26l.pt"
+    face_model_path: str = "yolo26l-pose.pt"
     face_enabled: bool = True
-    depth_model_path: str = "yolo26n-depth.pt"
+    depth_model_path: str = "yolo26l-depth.pt"
     device: str = "auto"
+    inference_fp16: bool = True
     confidence_threshold: float = 0.35
     iou_threshold: float = 0.45
     depth_enabled: bool = True

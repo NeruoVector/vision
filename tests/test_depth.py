@@ -158,3 +158,39 @@ def test_shared_depth_runtime_failure_cooldown_and_recovery(monkeypatch) -> None
     assert runtime.estimate(frame).shape == (20, 20)
     assert runtime.last_error is None
     assert runtime.last_inference_ms == 1.0
+
+
+def test_depth_sampling_preserves_finite_bounds_and_overlapping_patches() -> None:
+    estimator = DepthEstimator(Settings(_env_file=None, depth_min_m=0.5, depth_max_m=5.0))
+    depth = np.array([
+        [np.nan, np.inf, -np.inf, 0.49, 0.5],
+        [5.0, 5.01, 1.0, 2.0, 3.0],
+        [4.0, 0.5, 5.0, 1.0, 2.0],
+        [3.0, 4.0, 0.5, 5.0, 1.0],
+        [2.0, 3.0, 4.0, 0.5, 5.0],
+    ], dtype=np.float32)
+    box = BoundingBox(x1=0, y1=0, x2=5, y2=5)
+    values = depth[np.isfinite(depth)]
+    values = values[(values >= 0.5) & (values <= 5.0)]
+    assert estimator.median_depth(depth, box, inset_ratio=0, min_pixels=1) == float(
+        np.median(values)
+    )
+    points = [(1.0, 1.0), (1.0, 1.0), (4.0, 4.0), (float("nan"), 0.0)]
+    regions = [depth[0:3, 0:3], depth[0:3, 0:3], depth[3:5, 3:5]]
+    old_values = [region[np.isfinite(region)] for region in regions]
+    old_values = [values[(values >= 0.5) & (values <= 5.0)] for values in old_values]
+    expected = np.median(np.concatenate(old_values))
+    assert estimator.median_depth_around_points(
+        depth, points, radius_px=1, min_pixels=1
+    ) == float(expected)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_sampled_depth_matches_reference_for_noncontiguous_arrays(dtype) -> None:
+    from neurovector_vision.depth_sampling import valid_values
+
+    depth = np.random.default_rng(7).normal(4, 3, (30, 40)).astype(dtype)[::2, 1::2]
+    depth[0, :4] = [float("nan"), float("inf"), float("-inf"), 5.0]
+    reference = depth[np.isfinite(depth)]
+    reference = reference[(reference >= 0.5) & (reference <= 5.0)]
+    np.testing.assert_array_equal(valid_values(depth, 0.5, 5.0), reference)

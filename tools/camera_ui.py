@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import logging
+import struct
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -31,6 +33,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from neurovector_vision.camera_calibration import CameraCalibration
+from neurovector_vision.camera_capture import LatestFrameCapture
 from neurovector_vision.config import Settings
 from neurovector_vision.depth import DepthRuntime
 from neurovector_vision.detector import ObstacleDetector
@@ -56,10 +59,10 @@ HTML = Path(__file__).with_name("camera_ui.html").read_text(encoding="utf-8")
 @dataclass(frozen=True)
 class CameraConfig:
     camera_index: int = 0
-    face_model_path: str = "yolo26n-pose.pt"
-    object_model_path: str = "yolo26n.pt"
+    face_model_path: str = "yolo26l-pose.pt"
+    object_model_path: str = "yolo26l.pt"
     objects_enabled: bool = True
-    depth_model_path: str = "yolo26n-depth.pt"
+    depth_model_path: str = "yolo26l-depth.pt"
     width: int = 1280
     height: int = 720
     port: int = 8090
@@ -73,6 +76,7 @@ class CameraConfig:
     device: str = "auto"
     mirror: bool = True
     tracking_enabled: bool = True
+    depth_imgsz: int = 640
 
 
 class CalibrationRequest(BaseModel):
@@ -93,6 +97,7 @@ class CameraPipeline:
             model_path=config.object_model_path,
             face_model_path=config.face_model_path,
             depth_model_path=config.depth_model_path,
+            depth_imgsz=config.depth_imgsz,
             depth_enabled=config.depth_enabled,
             body_parts_enabled=config.body_parts_enabled,
             device=config.device,
@@ -193,7 +198,7 @@ class CameraPipeline:
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return encoded.tobytes() if ok else b""
 
-    def _open_camera(self) -> cv2.VideoCapture:
+    def _open_camera(self) -> LatestFrameCapture:
         capture = cv2.VideoCapture(self._config.camera_index, cv2.CAP_V4L2)
         if not capture.isOpened():
             capture.release()
@@ -203,7 +208,17 @@ class CameraPipeline:
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._config.height)
         capture.set(cv2.CAP_PROP_FPS, 30)
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return capture
+        capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+        try:
+            with open(f"/dev/video{self._config.camera_index}", "rb", buffering=0) as device:
+                exposure_auto_priority = 0x009A0903
+                set_control = 0xC008561C
+                fcntl.ioctl(
+                    device.fileno(), set_control, struct.pack("Ii", exposure_auto_priority, 0)
+                )
+        except OSError as exc:
+            logger.warning("Cannot disable variable camera frame rate: %s", exc)
+        return LatestFrameCapture(capture)
 
     def _make_intrinsics(
         self,
@@ -301,7 +316,9 @@ class CameraPipeline:
                 self._condition.notify_all()
 
             while self._running:
+                capture_started = time.perf_counter()
                 ok, frame = capture.read()
+                capture_ms = (time.perf_counter() - capture_started) * 1000.0
                 if not ok or frame is None:
                     time.sleep(0.05)
                     continue
@@ -403,6 +420,7 @@ class CameraPipeline:
                             "frames": self._status["frames"] + 1,
                             "fps": round(fps, 2),
                             "inference_ms": round(inference_ms, 1),
+                            "capture_wait_ms": round(capture_ms, 1),
                             "depth_ms": (
                                 round(self._detector.last_depth_ms, 1)
                                 if self._detector.last_depth_ms is not None
@@ -618,8 +636,13 @@ def create_app(config: CameraConfig) -> FastAPI:
         pipeline = request.app.state.pipeline
 
         def frames() -> AsyncIterator[bytes]:
+            previous: bytes | None = None
             while True:
                 jpeg = pipeline.latest()
+                if jpeg is previous:
+                    pipeline.wait_for_update(timeout=0.05)
+                    continue
+                previous = jpeg
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n"
@@ -655,6 +678,7 @@ def parse_args() -> CameraConfig:
     )
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--depth-imgsz", type=int, default=640)
     parser.add_argument("--device", default=settings.device, help="'auto', '0', or 'cpu'")
     parser.add_argument(
         "--calibration",
@@ -700,6 +724,7 @@ def parse_args() -> CameraConfig:
         depth_model_path=args.depth_model,
         width=args.width,
         height=args.height,
+        depth_imgsz=args.depth_imgsz,
         port=args.port,
         host=args.host,
         fov=args.fov,
@@ -723,6 +748,7 @@ def main() -> None:
         host=config.host,
         port=config.port,
         log_level="info",
+        timeout_graceful_shutdown=2,
     )
 
 

@@ -183,3 +183,26 @@ def test_invalid_upload_does_not_degrade_health(monkeypatch):
         response = client.post("/detect", files={"file": ("x.jpg", b"invalid")})
         assert response.status_code == 400
         assert client.get("/health").json()["status"] == "ok"
+
+
+def test_warmup_failure_reports_degraded_then_success_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RetryPipeline:
+        def __init__(self, _settings: Settings) -> None:
+            pass
+
+        def warmup(self) -> None:
+            raise RuntimeError("model unavailable")
+
+        def detect(self, _payload: bytes) -> list[Detection]:
+            return []
+
+    monkeypatch.setattr("neurovector_vision.api.VisionPipeline", RetryPipeline)
+    monkeypatch.setattr("neurovector_vision.api._settings", lambda: Settings(_env_file=None))
+    with TestClient(app) as client:
+        health = client.get("/health").json()
+        assert health["status"] == "degraded"
+        assert "model unavailable" in health["inference_error"]
+        assert client.post("/detect", files={"file": ("x.jpg", b"frame")}).status_code == 200
+        assert client.get("/health").json()["status"] == "ok"

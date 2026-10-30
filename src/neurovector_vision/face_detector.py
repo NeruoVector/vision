@@ -220,6 +220,7 @@ class FaceDistanceDetector:
             conf=self._settings.confidence_threshold,
             iou=self._settings.iou_threshold,
             device=self._settings.resolved_device,
+            quantize=16 if self._settings.inference_fp16 else 32,
             verbose=False,
         )
         if not results:

@@ -60,12 +60,19 @@ uv run --extra vision python tools/camera_ui.py
 uv run --extra vision python tools/camera_ui.py --face-only
 ```
 
+기본 가중치는 large (`yolo26l.pt`, `yolo26l-pose.pt`, `yolo26l-depth.pt`)입니다.
+CUDA에서는 FP16으로 추론하며 `NEUROVECTOR_INFERENCE_FP16=false`로 FP32를 사용할 수 있습니다.
+카메라 UI의 깊이 입력은 기본 640이며 `--depth-imgsz 768`로 변경할 수 있습니다.
+캡처는 별도 스레드에서 최신 프레임만 유지하고, 자동 노출에 따른 가변 프레임률을
+비활성화합니다. 카메라가 해당 제어를 지원하지 않으면 경고를 출력합니다.
+`/api/status`의 `capture_wait_ms`와 `inference_ms`로 입력 대기와 추론 시간을 확인할 수 있습니다.
+
 - 일반 객체와 얼굴, 몸통, 왼/오른팔, 왼/오른손, 왼/오른다리, 왼/오른발 박스와 거리.
 - 얼굴은 눈 간격 기반 보조 거리도 함께 표시하고, 나머지 부위는 깊이 모델 거리를 사용합니다.
-- `--object-model yolo26n.pt` (일반 객체), `--model yolo26n-pose.pt` (사람 키포인트),
-  `--depth-model yolo26n-depth.pt` (거리). 세 모델을 함께 사용합니다.
+- `--object-model yolo26l.pt` (일반 객체), `--model yolo26l-pose.pt` (사람 키포인트),
+  `--depth-model yolo26l-depth.pt` (거리). 세 모델을 함께 사용합니다.
 - `--device auto|0|cpu`, `--no-depth`, `--face-only`, `--focal`, `--face-scale` 지원.
-- YOLO26 가중치는 첫 실행 시 자동 다운로드됩니다. (`yolo26n.pt`, `yolo26n-pose.pt`, `yolo26n-depth.pt`)
+- YOLO26 가중치는 첫 실행 시 자동 다운로드됩니다. (`yolo26l.pt`, `yolo26l-pose.pt`, `yolo26l-depth.pt`)
 - 실제 RTX 3050에서 세 모델의 예열 후 샘플 통합 추론은 평균 약 39~45ms였습니다.
   [측정 조건과 결과](docs/runtime-validation-yolo26.md)를 참고하세요.
 - 손/팔은 YOLO26-pose가 사람을 감지했을 때 키포인트로 계산합니다. 손만 화면을
@@ -390,3 +397,36 @@ manifest 예시(이미지 경로는 manifest 파일 기준):
 
 단안 모델이 출력하는 미터 값은 추정치입니다. 실제 카메라의 거리 보정과
 실측 거리 라벨 평가가 필요하며, 현재 검증은 추론 실행과 데이터 흐름을 확인한 것입니다.
+
+### 모델과 배포 설정 확인
+
+독립 실행의 기본값은 객체 `yolo26l.pt`, 포즈 `yolo26l-pose.pt`, 깊이
+`yolo26l-depth.pt`이며 세 단계가 켜져 있습니다. Compose도 세 모델의 경로를
+기본으로 지정하지만 `VISION_WITH_MODEL=0`에서는 추론 의존성을 설치하지 않으므로
+경량 이미지의 예열은 실패하고 컨테이너 헬스 상태는 unhealthy입니다. 세 모델을
+사용하려면 이미 확보한 가중치를 한 디렉터리에 준비하고 다음처럼 빌드합니다.
+
+```bash
+VISION_WITH_MODEL=1 VISION_WEIGHTS_DIR=/absolute/path/to/weights docker compose build vision
+VISION_WITH_MODEL=1 VISION_WEIGHTS_DIR=/absolute/path/to/weights docker compose up -d vision
+```
+
+가중치 디렉터리 기본값은 `./vision/weights`이고, 컨테이너의 `/opt/vision-weights`에
+읽기 전용으로 마운트됩니다.
+기본 파일명은 `yolo26l.pt`, `yolo26l-pose.pt`, `yolo26l-depth.pt`입니다.
+다른 컨테이너 내부 경로를 쓰려면 각각 `VISION_MODEL_PATH`,
+`VISION_FACE_MODEL_PATH`, `VISION_DEPTH_MODEL_PATH`를 지정하세요. `.pt` 파일은
+빌드 컨텍스트에서 제외되므로 이미지 자체에 가중치가 포함되지 않습니다. GPU를
+쓰려면 컨테이너 GPU 접근과 호환되는 PyTorch CUDA 구성을 별도로 확인해야 합니다.
+의존성만 설치한다고 가중치 또는 GPU 사용 가능성이 보장되지는 않습니다.
+
+오프라인 사용 시 세 가중치 파일이 설정 경로에 이미 있어야 합니다. API 키는
+필요하지 않지만 파일이 없으면 모델 로드가 실패하거나 외부 다운로드를 시도할
+수 있으므로 네트워크 차단 환경에서 성공을 가정하지 마세요. 시작 시 예열은
+기본적으로 활성화되며 실패하면 `/health`의 `status`가 `degraded`이고 오류가
+기록됩니다. HTTP 200만으로 준비 완료를 판단하지 말고 JSON의 `status`,
+`inference_error`, `depth_error`, 모델명을 확인하세요. `/detect`는 유효하지
+않은 이미지를 400, 추론 사용 불가 또는 대기열 시간 초과를 503, 백엔드 전송
+실패를 502로 보고합니다. 백엔드 전송은 검출별 요청이므로 지연이 추론 시간보다
+클 수 있습니다. `/health`가 정상이라도 실제 거리 정확도나 안전한 비행을
+보증하지 않습니다.

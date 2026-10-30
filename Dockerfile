@@ -34,6 +34,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 EXPOSE 8082
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8082/health').status == 200 else 1)"
+    CMD python -c "import json,urllib.request,sys; response=urllib.request.urlopen('http://localhost:8082/health', timeout=2); sys.exit(0 if response.status == 200 and json.load(response).get('status') == 'ok' else 1)"
 
 CMD ["uvicorn", "neurovector_vision.api:app", "--host", "0.0.0.0", "--port", "8082"]

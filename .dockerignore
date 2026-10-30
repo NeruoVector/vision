@@ -8,5 +8,7 @@ __pycache__/
 .gitignore
 Dockerfile
 .dockerignore
-README.md
 LICENSE
+
+# Runtime weights are supplied through the read-only Compose mount.
+*.pt
