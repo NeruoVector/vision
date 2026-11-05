@@ -68,18 +68,27 @@ async def lifespan(app: FastAPI):
     runtime = InferenceRuntime(_settings())
     app.state.runtime = runtime
     try:
-        if runtime.settings.warmup_on_startup:
+        async with httpx.AsyncClient(timeout=runtime.settings.backend_timeout_seconds) as client:
+            app.state.backend = BackendClient(runtime.settings, client)
             try:
-                await asyncio.get_running_loop().run_in_executor(
-                    runtime.executor, runtime.pipeline.warmup
-                )
-            except Exception as exc:
-                runtime.error = f"{type(exc).__name__}: {exc}"
-                logger.exception("Vision warmup failed; inference will retry on the next request")
-        yield
+                if runtime.settings.warmup_on_startup:
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            runtime.executor, runtime.pipeline.warmup
+                        )
+                    except Exception as exc:
+                        runtime.error = f"{type(exc).__name__}: {exc}"
+                        logger.exception(
+                            "Vision warmup failed; inference will retry on the next request"
+                        )
+                yield
+            finally:
+                del app.state.backend
     finally:
-        await asyncio.to_thread(runtime.executor.shutdown, wait=True, cancel_futures=True)
-        del app.state.runtime
+        try:
+            await asyncio.to_thread(runtime.executor.shutdown, wait=True, cancel_futures=True)
+        finally:
+            del app.state.runtime
 
 
 app = FastAPI(
@@ -102,6 +111,7 @@ async def health(request: Request) -> dict:
         "depth_error": depth_error,
         "models": {
             "object": runtime.settings.model_path,
+            "secondary_object": runtime.settings.secondary_model_path,
             "pose": runtime.settings.face_model_path if runtime.settings.face_enabled else None,
             "depth": runtime.settings.depth_model_path if runtime.settings.depth_enabled else None,
         }
@@ -127,7 +137,7 @@ async def detect(request: Request, file: UploadFile) -> DetectResponse:
         raise HTTPException(status_code=503, detail="AI 추론을 사용할 수 없습니다.") from exc
 
     try:
-        forwarded = await BackendClient(settings).send_detections(settings.drone_id, detections)
+        forwarded = await request.app.state.backend.send_detections(settings.drone_id, detections)
     except httpx.HTTPError as exc:
         logger.warning("Backend forwarding failed: %s", type(exc).__name__)
         raise HTTPException(

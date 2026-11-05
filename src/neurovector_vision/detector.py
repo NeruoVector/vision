@@ -12,6 +12,30 @@ from .config import Settings
 from .distance import CameraIntrinsics, DistanceEstimator
 from .models import BoundingBox, Detection
 from .priority import priority_level_for
+from .tracking import _iou
+
+SECONDARY_LABELS = frozenset({"person", "bicycle", "car", "motorcycle", "bus", "truck"})
+LABEL_ALIASES = {"pedestrian": "person", "people": "person", "motor": "motorcycle", "van": "car"}
+ENCLOSED_VEHICLE_LABELS = frozenset({"car", "van", "truck", "bus"})
+
+
+def _merge_vehicle_detections(detections: list[Detection], iou_threshold: float) -> list[Detection]:
+    """Keep the highest-scoring overlapping vehicle; stable ties favor the primary model."""
+    ranked = sorted(
+        (index for index, detection in enumerate(detections)
+         if detection.label in ENCLOSED_VEHICLE_LABELS),
+        key=lambda index: -detections[index].confidence,
+    )
+    kept: list[int] = []
+    suppressed: set[int] = set()
+    for index in ranked:
+        if any(
+            _iou(detections[index].box, detections[other].box) > iou_threshold for other in kept
+        ):
+            suppressed.add(index)
+        else:
+            kept.append(index)
+    return [detection for index, detection in enumerate(detections) if index not in suppressed]
 
 
 class VisionBackendUnavailable(RuntimeError):
@@ -45,6 +69,7 @@ class ObstacleDetector:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._model = None
+        self._secondary_model = None
         self._camera_intrinsics: CameraIntrinsics | None = None
         self._distance = DistanceEstimator(
             horizontal_fov_deg=settings.camera_horizontal_fov_deg,
@@ -92,8 +117,25 @@ class ObstacleDetector:
             verbose=False,
         )
 
+        secondary_results = []
+        if self._settings.secondary_model_path is not None:
+            if self._secondary_model is None:
+                from ultralytics import YOLO
+
+                self._secondary_model = YOLO(self._settings.secondary_model_path)
+            secondary_results = self._secondary_model.predict(
+                source=source,
+                conf=self._settings.confidence_threshold,
+                iou=self._settings.iou_threshold,
+                device=self._settings.resolved_device,
+                imgsz=640,
+                verbose=False,
+            )
+
         detections: list[Detection] = []
-        for result in results:
+        for result, secondary in [(result, False) for result in results] + [
+            (result, True) for result in secondary_results
+        ]:
             names = result.names
             # 원본 이미지 크기를 사용해야 리사이즈 후에도 초점 거리가 맞는다.
             image_width = int(result.orig_shape[1])
@@ -111,7 +153,15 @@ class ObstacleDetector:
             for box in result.boxes:
                 x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
                 label = str(names[int(box.cls[0])])
+                if secondary and label not in SECONDARY_LABELS:
+                    continue
                 bounding_box = BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
+                if secondary and label not in ENCLOSED_VEHICLE_LABELS and any(
+                    LABEL_ALIASES.get(existing.label, existing.label) == label
+                    and _iou(existing.box, bounding_box) >= self._settings.iou_threshold
+                    for existing in detections
+                ):
+                    continue
                 estimate = self._distance.estimate_detail(
                     label,
                     bounding_box,
@@ -133,4 +183,6 @@ class ObstacleDetector:
                     )
                 )
 
+        if self._settings.secondary_model_path is not None:
+            return _merge_vehicle_detections(detections, self._settings.iou_threshold)
         return detections

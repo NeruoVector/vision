@@ -9,8 +9,8 @@ from .models import Detection, DetectionRequest
 
 
 class BackendClient:
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
+    def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
+        self._client = client
         self._url = settings.backend_detections_url
 
     async def send_detections(
@@ -25,19 +25,17 @@ class BackendClient:
             return 0
 
         sent = 0
-        async with httpx.AsyncClient(timeout=self._settings.backend_timeout_seconds) as client:
-            for detection in detections:
-                payload = DetectionRequest(
-                    drone_id=drone_id,
-                    label=detection.label,
-                    confidence=detection.confidence,
-                    latitude=latitude,
-                    longitude=longitude,
-                    distance_m=detection.distance_m,
-                    priority_level=detection.priority_level,
-                )
-                response = await client.post(self._url, json=payload.model_dump(mode="json"))
-                response.raise_for_status()
-                sent += 1
-
+        for detection in detections:
+            payload = DetectionRequest(
+                drone_id=drone_id,
+                label=detection.label,
+                confidence=detection.confidence,
+                latitude=latitude,
+                longitude=longitude,
+                distance_m=detection.distance_m,
+                priority_level=detection.priority_level,
+            )
+            response = await self._client.post(self._url, json=payload.model_dump(mode="json"))
+            response.raise_for_status()
+            sent += 1
         return sent

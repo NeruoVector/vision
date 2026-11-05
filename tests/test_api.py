@@ -23,6 +23,53 @@ def test_settings_defaults() -> None:
     assert settings.backend_detections_url.endswith("/api/v1/detections")
 
 
+def test_health_reports_primary_and_secondary_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given an opted-in supplemental detector, with startup inference disabled.
+    monkeypatch.setattr(
+        "neurovector_vision.api._settings",
+        lambda: Settings(
+            _env_file=None,
+            model_path="school_obstacles_best.pt",
+            secondary_model_path="models/yolo26n.pt",
+            warmup_on_startup=False,
+        ),
+    )
+
+    # When the service reports its configuration.
+    with TestClient(app) as client:
+        models = client.get("/health").json()["models"]
+
+    # Then the primary identity remains visible alongside the supplemental model.
+    assert models["object"] == "school_obstacles_best.pt"
+    assert models["secondary_object"] == "models/yolo26n.pt"
+
+
+def test_secondary_load_failure_degrades_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    from neurovector_vision.pipeline import VisionPipeline
+
+    # Given an enabled supplemental checkpoint that fails inside serialized inference.
+    def fail_detect(self, payload):
+        raise FileNotFoundError("secondary checkpoint missing")
+
+    monkeypatch.setattr(VisionPipeline, "detect", fail_detect)
+    monkeypatch.setattr(
+        "neurovector_vision.api._settings",
+        lambda: Settings(
+            _env_file=None, secondary_model_path="missing.pt", warmup_on_startup=False
+        ),
+    )
+
+    # When an inference request cannot load the configured detector.
+    with TestClient(app) as client:
+        response = client.post("/detect", files={"file": ("frame.jpg", b"frame")})
+        health = client.get("/health").json()
+
+    # Then no successful response hides the missing coverage.
+    assert response.status_code == 503
+    assert health["status"] == "degraded"
+    assert "FileNotFoundError" in health["inference_error"]
+
+
 def test_detection_model_validation() -> None:
     detection = Detection(
         label="tree",
@@ -183,3 +230,75 @@ def test_invalid_upload_does_not_degrade_health(monkeypatch):
         response = client.post("/detect", files={"file": ("x.jpg", b"invalid")})
         assert response.status_code == 400
         assert client.get("/health").json()["status"] == "ok"
+
+
+def test_backend_pool_is_shared_and_closed_with_app_lifespan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    clients: list[httpx.AsyncClient] = []
+    calls: list[httpx.Request] = []
+    original_client = httpx.AsyncClient
+
+    def receive(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(201, json={})
+
+    def pooled_client(*, timeout: float) -> httpx.AsyncClient:
+        http = original_client(timeout=timeout, transport=httpx.MockTransport(receive))
+        clients.append(http)
+        return http
+
+    class FakePipeline:
+        def __init__(self, settings: Settings) -> None:
+            pass
+
+        def detect(self, payload: bytes) -> list[Detection]:
+            return [
+                Detection(label="person", confidence=0.9, box=BoundingBox(x1=0, y1=0, x2=10, y2=10))
+            ]
+
+    monkeypatch.setattr(
+        "neurovector_vision.api._settings",
+        lambda: Settings(_env_file=None, warmup_on_startup=False),
+    )
+    monkeypatch.setattr("neurovector_vision.api.VisionPipeline", FakePipeline)
+    monkeypatch.setattr("neurovector_vision.api.httpx.AsyncClient", pooled_client)
+    with TestClient(app) as client:
+        for _ in range(2):
+            assert client.post("/detect", files={"file": ("x.jpg", b"x")}).json()["forwarded"] == 1
+        assert len(clients) == 1
+        assert not clients[0].is_closed
+    assert len(calls) == 2
+    assert clients[0].is_closed
+    assert not hasattr(app.state, "backend")
+    with TestClient(app) as client:
+        assert client.post("/detect", files={"file": ("x.jpg", b"x")}).status_code == 200
+        assert len(clients) == 2
+        assert not clients[1].is_closed
+    assert clients[1].is_closed
+
+
+def test_http_startup_failure_still_releases_inference_resources(monkeypatch):
+    import anyio
+
+    from neurovector_vision.api import InferenceRuntime, lifespan
+
+    runtime = InferenceRuntime(Settings(_env_file=None, warmup_on_startup=False))
+    monkeypatch.setattr("neurovector_vision.api.InferenceRuntime", lambda settings: runtime)
+
+    def unavailable_client(**kwargs):
+        raise RuntimeError("HTTP initialization failed")
+
+    monkeypatch.setattr("neurovector_vision.api.httpx.AsyncClient", unavailable_client)
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="initialization"):
+            async with lifespan(app):
+                pytest.fail("Startup should fail before accepting requests")
+
+    anyio.run(scenario)
+    assert not hasattr(app.state, "runtime")
+    with pytest.raises(RuntimeError, match="shutdown"):
+        runtime.executor.submit(lambda: None)

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     # 모델 / 추론 장치
     model_path: str = "yolo26n.pt"
+    secondary_model_path: str | None = None
     face_model_path: str = "yolo26n-pose.pt"
     face_enabled: bool = True
     depth_model_path: str = "yolo26n-depth.pt"
